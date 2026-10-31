@@ -9,9 +9,12 @@ const crossOriginIsolation = {
 };
 
 export default defineConfig({
+  // Sub-path deployments such as GitHub Pages (`/tessera/`) set BASE_PATH.
+  base: process.env.BASE_PATH ?? "/",
   plugins: [react()],
   server: { headers: crossOriginIsolation },
-  preview: { headers: crossOriginIsolation },
+  // NO_COI_HEADERS=1 mimics GitHub Pages, where public/coi-sw.js must supply the headers.
+  preview: { headers: process.env.NO_COI_HEADERS ? {} : crossOriginIsolation },
   worker: { format: "es" },
   build: { target: "es2022" },
 });

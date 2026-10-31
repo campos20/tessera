@@ -90,6 +90,8 @@ jobs:
       - name: Install Playwright Chromium
         run: pnpm --filter @tessera/web exec playwright install --with-deps chromium
       - run: pnpm e2e
+      - name: E2E as deployed on GitHub Pages (sub-path, no COOP/COEP headers)
+        run: pnpm e2e:pages
 
       - uses: actions/upload-artifact@v4
         if: failure()

@@ -18,7 +18,8 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write . && cargo fmt --all",
     "test": "pnpm build:wasm && vitest run",
-    "e2e": "pnpm build:wasm && pnpm --filter @tessera/web e2e"
+    "e2e": "pnpm build:wasm && pnpm --filter @tessera/web e2e",
+    "e2e:pages": "pnpm build:wasm && pnpm --filter @tessera/web e2e:pages"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

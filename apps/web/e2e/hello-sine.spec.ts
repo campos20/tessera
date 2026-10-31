@@ -1,15 +1,23 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
+
+// Relative to baseURL, so the same tests cover sub-path deployments (GitHub Pages).
+const HOME = "./";
+
+/** On hosts without COOP/COEP headers the page reloads itself once via coi-sw.js. */
+async function openIsolated(page: Page) {
+  await page.goto(HOME);
+  await page.waitForFunction(() => globalThis.crossOriginIsolated === true);
+}
 
 test("page is cross-origin isolated", async ({ page }) => {
-  await page.goto("/");
-  expect(await page.evaluate(() => globalThis.crossOriginIsolated)).toBe(true);
+  await openIsolated(page);
   await expect(page.getByTestId("diag-crossOriginIsolated")).toHaveText("true");
 });
 
 test("plays the engine-core sine through the AudioWorklet", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(e.message));
-  await page.goto("/");
+  await openIsolated(page);
 
   await page.getByRole("button", { name: "Play" }).click();
   await expect(page.getByTestId("status")).toHaveText("Status: playing");

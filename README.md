@@ -33,6 +33,7 @@ pnpm install
 | `cargo test --workspace` | Rust tests (engine-core includes an `assert_no_alloc` test of the audio path) |
 | `pnpm test`              | Builds `engine.wasm`, runs Vitest (including tests against the real module)   |
 | `pnpm e2e`               | Playwright (Chromium) against the production web build                        |
+| `pnpm e2e:pages`         | Same, served as on GitHub Pages (sub-path, no COOP/COEP headers)              |
 | `pnpm lint`              | ESLint + Prettier check                                                       |
 | `pnpm typecheck`         | `tsc` in every package                                                        |
 | `pnpm gen:schema`        | Regenerates `packages/schema/src/generated` from the Rust protocol types      |
@@ -73,6 +74,16 @@ Cross-Origin-Embedder-Policy: require-corp
 
 The Vite dev and preview servers already send them. The status panel shows
 `crossOriginIsolated: true` when they are in effect.
+
+### GitHub Pages
+
+`.github/workflows/pages.yml` deploys the web edition on every push to `main` (or manually from the
+Actions tab) to `https://<owner>.github.io/<repo>/`. One-time setup: **Settings → Pages → Source:
+GitHub Actions**.
+
+GitHub Pages can't send custom headers. Instead, `apps/web/public/coi-sw.js` is a service worker
+that adds them: on the first visit the page installs it and reloads once. Build with
+`BASE_PATH=/<repo>/` for sub-path hosting; `pnpm e2e:pages` tests this setup locally.
 
 ## License
 

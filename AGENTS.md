@@ -59,6 +59,7 @@ approval before coding. Before calling a milestone done, make sure its acceptanc
 | `cargo test --workspace` | Rust tests                                                        |
 | `pnpm test`              | Build `engine.wasm` and run Vitest                                |
 | `pnpm e2e`               | Playwright against the production web build (`E2E_DEV=1` for dev) |
+| `pnpm e2e:pages`         | Playwright as deployed on GitHub Pages (sub-path, no COOP/COEP)   |
 | `pnpm lint`              | ESLint + Prettier check                                           |
 | `pnpm typecheck`         | `tsc` in every package                                            |
 | `pnpm gen:schema`        | Regenerate TS types from Rust                                     |
@@ -75,7 +76,7 @@ crates/project         project model, serde schema versions, migrations
 crates/engine-wasm     raw C-ABI WASM build of engine-core for the AudioWorklet (no wasm-bindgen)
 crates/engine-native   cpal I/O, device management, MIDI (desktop)
 crates/plugin-host     VST3/CLAP scanning and hosting (desktop)
-apps/web               Vite app using WebPlatform (COOP/COEP headers required)
+apps/web               Vite app using WebPlatform (COOP/COEP headers, or public/coi-sw.js on GitHub Pages)
 apps/desktop           Tauri v2 app using TauriPlatform; Rust backend in src-tauri/
 packages/platform      AudioPlatform interface + WebPlatform + TauriPlatform
 packages/ui            shared React UI

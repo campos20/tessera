@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "e2e": "vite build && playwright test"
+    "e2e": "vite build && playwright test",
+    "e2e:pages": "BASE_PATH=/tessera/ vite build && E2E_PAGES=1 playwright test"
   },
   "dependencies": {
     "@tessera/platform": "workspace:*",

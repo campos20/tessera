@@ -52,7 +52,13 @@ export default tseslint.config(
     },
   },
   {
+    // Plain scripts served as-is by the web app (service worker and its loader).
+    files: ["apps/web/public/**/*.js"],
+    languageOptions: { sourceType: "script", globals: { ...globals.browser, ...globals.serviceworker } },
+  },
+  {
     files: ["**/*.{js,mjs}", "**/*.config.ts", "**/e2e/**"],
+    ignores: ["apps/web/public/**"],
     languageOptions: { globals: { ...globals.node } },
   },
 );
