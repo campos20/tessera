@@ -1,0 +1,23 @@
+{
+  "name": "@tessera/platform",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "description": "The AudioPlatform interface the UI talks to, plus its web (AudioWorklet + WASM) and desktop (Tauri) implementations.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./web": "./src/web/index.ts",
+    "./tauri": "./src/tauri/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.4",
+    "@tessera/schema": "workspace:*"
+  },
+  "devDependencies": {
+    "vite": "^8.3.5"
+  }
+}

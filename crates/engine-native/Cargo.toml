@@ -1,0 +1,31 @@
+[package]
+name = "engine-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Desktop audio I/O for Tessera: cpal output stream driving engine-core, device enumeration."
+
+[features]
+default = []
+# Windows ASIO host. Needs the ASIO SDK (CPAL_ASIO_DIR) and LLVM/clang at build time.
+asio = ["cpal/asio"]
+# Linux JACK host (also covers PipeWire via its JACK layer).
+jack = ["cpal/jack"]
+# Generate TypeScript bindings into packages/schema.
+ts = ["dep:ts-rs", "engine-core/ts"]
+
+[dependencies]
+assert_no_alloc = "1.1.2"
+cpal = "0.18.2"
+engine-core = { version = "0.1.0", path = "../engine-core", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+ts-rs = { version = "12.0.1", optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json = "1.0.154"

@@ -1,0 +1,26 @@
+[package]
+name = "tessera-desktop"
+description = "Tessera desktop edition (Tauri v2 shell around engine-native)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = []
+asio = ["engine-native/asio"]
+jack = ["engine-native/jack"]
+
+[dependencies]
+assert_no_alloc = "1.1.2"
+engine-core = { version = "0.1.0", path = "../../../crates/engine-core", features = ["serde"] }
+engine-native = { version = "0.1.0", path = "../../../crates/engine-native" }
+tauri = { version = "2", features = [] }
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
