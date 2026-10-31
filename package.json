@@ -1,0 +1,34 @@
+{
+  "name": "tessera",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "packageManager": "pnpm@12.11.2",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "gen:schema": "cargo test -q -p engine-core -p engine-native --features engine-core/ts,engine-native/ts export",
+    "dev:web": "pnpm build:wasm && pnpm --filter @tessera/web dev",
+    "dev:desktop": "pnpm --filter @tessera/desktop tauri dev",
+    "build:web": "pnpm build:wasm && pnpm --filter @tessera/web build",
+    "build:desktop": "pnpm --filter @tessera/desktop tauri build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write . && cargo fmt --all",
+    "test": "pnpm build:wasm && vitest run",
+    "e2e": "pnpm build:wasm && pnpm --filter @tessera/web e2e"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^26.6.6",
+    "eslint": "^10.14.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.13.0",
+    "prettier": "^3.9.10",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.72.1",
+    "vitest": "^5.0.5"
+  }
+}

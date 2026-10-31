@@ -1,0 +1,14 @@
+{
+  "name": "@tessera/schema",
+  "version": "0.1.0",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "description": "TypeScript types generated from the Rust protocol (`pnpm gen:schema`). Never hand-edit src/generated.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

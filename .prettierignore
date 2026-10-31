@@ -1,0 +1,10 @@
+target/
+dist/
+node_modules/
+pnpm-lock.yaml
+packages/schema/src/generated/
+apps/desktop/src-tauri/gen/
+apps/desktop/src-tauri/icons/
+**/playwright-report/
+**/test-results/
+LICENSE
