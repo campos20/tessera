@@ -34,6 +34,10 @@ layers only do I/O.
 - **Generated types.** Protocol and project types are defined in Rust and generated to
   `packages/schema/src/generated` (`pnpm gen:schema`). Never hand-edit generated files; commit the
   regenerated output (CI checks it is fresh).
+- **Protocol.** UI ↔ engine messages are defined once in `engine-core/src/protocol.rs` (the
+  `protocol!` macro). It derives the serde/JSON form (Tauri IPC), the raw `opcode + f64 args` form
+  (web rings and WASM ABI) and the generated TypeScript layout table. Add commands there, never
+  by hand-writing opcodes in TypeScript. Positions are frames at the engine sample rate.
 - **Tests.** Every DSP change needs a test. Prefer offline-render golden tests with dB tolerances,
   never bit-exact comparisons across platforms.
 - **Ask first** before:
@@ -75,6 +79,8 @@ crates/tune            pitch analysis, note segmentation, key/tempo, PSOLA rende
 crates/project         project model, serde schema versions, migrations
 crates/engine-wasm     raw C-ABI WASM build of engine-core for the AudioWorklet (no wasm-bindgen)
 crates/engine-native   cpal I/O, device management, MIDI (desktop)
+crates/media           decoding (symphonia), resampling (rubato), waveform peaks; no engine dependency
+crates/media-wasm      raw C-ABI WASM build of media, run in a Web Worker
 crates/plugin-host     VST3/CLAP scanning and hosting (desktop)
 apps/web               Vite app using WebPlatform (COOP/COEP headers, or public/coi-sw.js on GitHub Pages)
 apps/desktop           Tauri v2 app using TauriPlatform; Rust backend in src-tauri/
@@ -94,8 +100,14 @@ packages/schema        generated TS types
 
 ## Roadmap
 
-- [ ] **M0** Skeleton, CI, "hello sine" in both editions from the same engine-core oscillator.
+- [x] **M0** Skeleton, CI, "hello sine" in both editions from the same engine-core oscillator.
 - [ ] **M1** Engine core: graph, transport, clip playback, mixer basics, file import, offline render.
+  - Accept: a 2-track project rendered offline matches a golden file (−90 dB); a project with no
+    processing renders within −90 dB of its sources; no allocations on the audio thread
+    (`assert_no_alloc`, including a 64-track random-command stress test); 16 tracks play
+    glitch-free in the web edition on a mid-range laptop.
+  - Decisions: decoding lives in `crates/media`; the web edition stays on stable Rust, so decoded
+    audio is copied into the worklet's WASM memory in chunks at import time, never in `process()`.
 - [ ] **M2** Timeline UI and projects: arrange view, undo/redo, save/load, `.tessera` zip, migrations.
 - [ ] **M3** Devices and recording: device settings, latency calibration, recording with punch.
 - [ ] **M4** Tune: analysis, note editing, pitch correction, timing quantize, incremental re-render.

@@ -17,6 +17,7 @@ jack = ["engine-native/jack"]
 assert_no_alloc = "1.1.2"
 engine-core = { version = "0.1.0", path = "../../../crates/engine-core", features = ["serde"] }
 engine-native = { version = "0.1.0", path = "../../../crates/engine-native" }
+media = { version = "0.1.0", path = "../../../crates/media" }
 tauri = { version = "2", features = [] }
 
 [lints]

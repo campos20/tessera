@@ -1,0 +1,18 @@
+[package]
+name = "media-wasm"
+description = "WASM build of the media crate with a raw C ABI, run in the web edition's decode worker."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+media = { path = "../media" }
+
+[lints]
+workspace = true

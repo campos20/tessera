@@ -10,7 +10,7 @@ pitch-alignment software. It is built from one codebase in two editions:
 All DSP lives in Rust crates that compile to both WebAssembly and native code. See
 [AGENTS.md](AGENTS.md) for the architecture, conventions and roadmap.
 
-**Status:** M0 (repository skeleton, CI, "hello sine" in both editions).
+**Status:** M1 (engine core: tracks, clips, mixer, transport, metronome, audio import), with an engine testbench UI in both editions.
 
 ## Prerequisites
 
@@ -52,7 +52,9 @@ For example: `pnpm --filter @tessera/desktop tauri dev --features asio`.
 ```
 crates/engine-core     platform-agnostic engine (DSP, command/event protocol); no I/O, no threads
 crates/engine-wasm     raw C-ABI WASM build of engine-core, run inside the AudioWorklet
-crates/engine-native   cpal output stream + device enumeration (desktop)
+crates/engine-native   cpal output stream, device enumeration, file import (desktop)
+crates/media           decoding (WAV, FLAC, MP3, OGG Vorbis, AAC/M4A), resampling, waveform peaks
+crates/media-wasm      raw C-ABI WASM build of media, run in a Web Worker
 crates/tune            Tune pitch editor DSP (M4)
 crates/project         project model and schema migrations (M2)
 crates/plugin-host     VST3/CLAP hosting (M7)
