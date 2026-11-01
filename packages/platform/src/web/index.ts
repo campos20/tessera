@@ -20,7 +20,6 @@ import {
 import wasmUrl from "./engine.wasm?url";
 import workletUrl from "./worklet.ts?worker&url";
 
-const SAMPLE_RATE = 48_000;
 const RING_CAPACITY = 1024;
 const GC_INTERVAL_MS = 1000;
 
@@ -166,7 +165,10 @@ export class WebPlatform implements AudioPlatform {
   private async createEngine(): Promise<void> {
     const commands = this.commandRing();
     const events = MessageRing.create(RING_CAPACITY);
-    const ctx = new AudioContext({ latencyHint: "interactive", sampleRate: SAMPLE_RATE });
+    // Run at the output device's native rate (like the desktop edition). Forcing a rate makes the
+    // browser resample the output, and resampling loud material creates inter-sample overs that
+    // clip at the destination.
+    const ctx = new AudioContext({ latencyHint: "interactive" });
     try {
       const [module] = await Promise.all([
         WebAssembly.compileStreaming(fetch(wasmUrl)),

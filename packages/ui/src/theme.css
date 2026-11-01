@@ -1,0 +1,53 @@
+/* Tessera dark theme. Components use these variables only. */
+:root {
+  --bg: #161618;
+  --panel: #1f1f22;
+  --panel-raised: #2a2a2e;
+  --panel-hover: #333338;
+  --border: #36363b;
+  --border-strong: #48484f;
+  --text: #ececf0;
+  --text-dim: #9a9aa3;
+  --text-faint: #6b6b73;
+  --accent: #ff9f0a;
+  --playhead: #ff9f0a;
+  --loop: rgba(10, 132, 255, 0.18);
+  --loop-strong: #0a84ff;
+  --mute: #ffd60a;
+  --solo: #30d158;
+  --record: #ff453a;
+  --meter: #30d158;
+  --meter-hot: #ffd60a;
+  --meter-clip: #ff453a;
+  --grid-bar: rgba(255, 255, 255, 0.1);
+  --grid-beat: rgba(255, 255, 255, 0.05);
+  --grid-sub: rgba(255, 255, 255, 0.025);
+  --lane: #1b1b1e;
+  --lane-alt: #1d1d20;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --radius: 6px;
+
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.3 var(--font);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+  user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}

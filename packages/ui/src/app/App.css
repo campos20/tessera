@@ -1,0 +1,17 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.status-bar {
+  display: flex;
+  gap: 18px;
+  height: 24px;
+  align-items: center;
+  padding: 0 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 11px;
+}
