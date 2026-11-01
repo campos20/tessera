@@ -10,8 +10,8 @@ pitch-alignment software. It is built from one codebase in two editions:
 All DSP lives in Rust crates that compile to both WebAssembly and native code. See
 [AGENTS.md](AGENTS.md) for the architecture, conventions and roadmap.
 
-**Status:** M4 in progress: Tune (note-level pitch and timing editing), on top of recording
-(M3, pending hardware checks), the arrange view and projects.
+**Status:** M5 in progress: mixer, built-in effects and automation, on top of Tune (M4),
+recording (M3, pending hardware checks), the arrange view and projects.
 
 ## Using it
 
@@ -31,6 +31,13 @@ All DSP lives in Rust crates that compile to both WebAssembly and native code. S
   drift and vibrato, reset, and an A/B switch to compare with the original. Arrow keys move the
   selection by a semitone (Shift: an octave). Edits are undoable and saved with the project; only
   the edited regions are re-rendered.
+- **Mix:** **Mixer** (X) opens a channel strip per track plus the master: fader, pan, meters,
+  mute/solo, output routing, sends and an insert chain. Built-in effects: EQ (8 bands),
+  compressor, gate, limiter, delay, reverb, chorus, saturation and utility. Click an effect to
+  edit it (the EQ has a draggable curve); **+ Bus** adds a bus to send or route tracks to.
+- **Automation:** in a track's ⋯ menu, **Show automation** opens a lane for volume, pan, a send
+  or an effect parameter (or use the **A** button next to a parameter). Click to add points,
+  drag them, double-click or Alt-click to delete.
 - **Devices and latency:** ⚙ opens the audio settings. Calibrate with a cable from an output to
   an input: Tessera plays its metronome, records it back and measures the delay. On desktop,
   `cargo run --release -p engine-native --example soak -- --buffer 128 --minutes 10 --input default`
@@ -48,6 +55,7 @@ All DSP lives in Rust crates that compile to both WebAssembly and native code. S
 | ⌘/Ctrl Z, ⇧⌘/Ctrl Z              | Undo, redo                                                   |
 | ⌘/Ctrl A, Esc                    | Select all clips, clear selection                            |
 | L, C, N                          | Loop, metronome, snap                                        |
+| X                                | Show / hide the mixer                                        |
 | + / −, ⌘/Ctrl-scroll or pinch    | Zoom                                                         |
 | Shift-scroll or horizontal swipe | Scroll the timeline                                          |
 
@@ -89,7 +97,7 @@ For example: `pnpm --filter @tessera/desktop tauri dev --features asio`.
 ## Layout
 
 ```
-crates/engine-core     platform-agnostic engine (DSP, command/event protocol); no I/O, no threads
+crates/engine-core     platform-agnostic engine: mixer, built-in effects, automation, protocol; no I/O
 crates/engine-wasm     raw C-ABI WASM build of engine-core, run inside the AudioWorklet
 crates/engine-native   cpal input/output, device settings, take recorder, file import (desktop)
 crates/media           decoding (WAV, FLAC, MP3, OGG Vorbis, AAC/M4A), resampling, waveform peaks

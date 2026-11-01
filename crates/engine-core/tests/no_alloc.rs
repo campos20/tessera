@@ -190,3 +190,156 @@ fn full_tables_do_not_allocate() {
         "overflowing sources are handed back"
     );
 }
+
+/// Devices, buses, sends and automation changing at random while 24 tracks play.
+#[test]
+fn stress_devices_routing_and_automation() {
+    use engine_core::automation::{AutomationTarget, Envelope};
+    use engine_core::devices::DeviceKind;
+    use engine_core::{MASTER_TRACK, MAX_DEVICES, MAX_LANES};
+
+    let (mut engine, mut ctl) = Engine::new(SR as f32);
+    let mut rng = Lcg(7);
+    let mut out = vec![0.0f32; 300 * 2];
+    let frames = SR as usize / 2;
+    for t in 0..24u32 {
+        ctl.add_source(t, buffer(vec![noise(u64::from(t), 0.1, frames)]))
+            .unwrap();
+        ctl.send(Command::AddTrack { track: t }).unwrap();
+        ctl.send(Command::SetClip {
+            clip: t,
+            track: t,
+            source: t,
+            start: 0,
+            offset: 0,
+            length: frames as u64,
+            gain: 1.0,
+            fade_in: 0,
+            fade_out: 0,
+        })
+        .unwrap();
+    }
+    ctl.send(Command::SetLoop {
+        enabled: true,
+        start: 0,
+        end: frames as u64,
+    })
+    .unwrap();
+    ctl.send(Command::Play).unwrap();
+    let track = |rng: &mut Lcg| match rng.next_u32() % 26 {
+        24 => MASTER_TRACK,
+        25 => 99, // missing
+        t => t,
+    };
+
+    for round in 0..600 {
+        for _ in 0..6 {
+            let device = rng.next_u32() % 80;
+            let kind = rng.next_u32() % (DeviceKind::ALL.len() as u32 + 1);
+            let cmd = match rng.next_u32() % 9 {
+                0 | 1 => Command::AddDevice {
+                    device,
+                    track: track(&mut rng),
+                    position: rng.next_u32() % 20,
+                    kind,
+                },
+                2 => Command::RemoveDevice { device },
+                3 => Command::MoveDevice {
+                    device,
+                    track: track(&mut rng),
+                    position: rng.next_u32() % 20,
+                },
+                4 => Command::SetDeviceBypass {
+                    device,
+                    bypass: rng.next_u32().is_multiple_of(3),
+                },
+                5 => Command::SetDeviceParam {
+                    device,
+                    param: rng.next_u32() % 50,
+                    value: rng.next_f32() * 30_000.0,
+                },
+                6 => Command::SetTrackOutput {
+                    track: rng.next_u32() % 24,
+                    output: track(&mut rng),
+                },
+                7 => Command::SetSend {
+                    track: rng.next_u32() % 24,
+                    index: rng.next_u32() % 10,
+                    enabled: !rng.next_u32().is_multiple_of(3),
+                    target: track(&mut rng),
+                    gain: rng.next_f32().abs(),
+                    pre: rng.next_u32().is_multiple_of(2),
+                },
+                _ => Command::RemoveAutomation {
+                    lane: rng.next_u32() % 40,
+                },
+            };
+            let _ = ctl.send(cmd);
+        }
+        if round % 3 == 0 {
+            let target = match rng.next_u32() % 4 {
+                0 => AutomationTarget::Volume,
+                1 => AutomationTarget::Pan,
+                2 => AutomationTarget::Send(rng.next_u32() % 9),
+                _ => AutomationTarget::Param {
+                    device: rng.next_u32() % 80,
+                    param: rng.next_u32() % 50,
+                },
+            };
+            let points = (0..rng.next_u32() % 6)
+                .map(|_| {
+                    (
+                        u64::from(rng.next_u32()) % frames as u64,
+                        rng.next_f32() * 2.0,
+                    )
+                })
+                .collect::<Vec<_>>();
+            ctl.set_automation(
+                rng.next_u32() % 40,
+                rng.next_u32() % 24,
+                target,
+                Envelope::new(points),
+            );
+        }
+        // The web path: state may arrive before or after its command.
+        if round % 7 == 0 {
+            ctl.create_device(rng.next_u32() % 80, rng.next_u32() % 9);
+        }
+
+        assert_no_alloc(|| {
+            for _ in 0..3 {
+                engine.process(&mut out, 2);
+            }
+        });
+        while ctl.poll_event().is_some() {}
+        ctl.collect_garbage();
+        assert!(out.iter().all(|s| s.is_finite()), "round {round}");
+    }
+
+    // Filling the device and lane tables doesn't allocate either.
+    for d in 0..(MAX_DEVICES as u32 + 10) {
+        let _ = ctl.send(Command::AddDevice {
+            device: 1_000 + d,
+            track: d % 24,
+            position: 0,
+            kind: DeviceKind::Utility.code(),
+        });
+        if d % 64 == 0 {
+            assert_no_alloc(|| engine.process(&mut out, 2));
+            ctl.collect_garbage();
+        }
+    }
+    for l in 0..(MAX_LANES as u32 + 10) {
+        ctl.set_automation(
+            l,
+            l % 24,
+            AutomationTarget::Volume,
+            Envelope::new([(0, 0.5)]),
+        );
+        if l % 256 == 0 {
+            assert_no_alloc(|| engine.process(&mut out, 2));
+            ctl.collect_garbage();
+        }
+    }
+    assert_no_alloc(|| engine.process(&mut out, 2));
+}

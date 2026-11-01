@@ -2,6 +2,12 @@
 
 export const MAX_ARGS = 9;
 
+/** Track id addressing the master bus (device chains, outputs). */
+export const MASTER_TRACK = 4294967295;
+
+/** Most sends per track. */
+export const MAX_SENDS = 8;
+
 export type FieldKind = "bool" | "number";
 
 export interface MessageLayout {
@@ -32,6 +38,14 @@ export const CommandLayout = {
   SetRecord: { op: 19, fields: [["enabled", "bool"]] },
   SetPunch: { op: 20, fields: [["enabled", "bool"], ["start", "number"], ["end", "number"]] },
   SetCountIn: { op: 21, fields: [["frames", "number"]] },
+  AddDevice: { op: 22, fields: [["device", "number"], ["track", "number"], ["position", "number"], ["kind", "number"]] },
+  RemoveDevice: { op: 23, fields: [["device", "number"]] },
+  MoveDevice: { op: 24, fields: [["device", "number"], ["track", "number"], ["position", "number"]] },
+  SetDeviceBypass: { op: 25, fields: [["device", "number"], ["bypass", "bool"]] },
+  SetDeviceParam: { op: 26, fields: [["device", "number"], ["param", "number"], ["value", "number"]] },
+  SetTrackOutput: { op: 27, fields: [["track", "number"], ["output", "number"]] },
+  SetSend: { op: 28, fields: [["track", "number"], ["index", "number"], ["enabled", "bool"], ["target", "number"], ["gain", "number"], ["pre", "bool"]] },
+  RemoveAutomation: { op: 29, fields: [["lane", "number"]] },
 } as const satisfies Record<string, MessageLayout>;
 
 export const EventLayout = {
@@ -40,5 +54,6 @@ export const EventLayout = {
   MasterMeter: { op: 2, fields: [["peakL", "number"], ["peakR", "number"], ["rmsL", "number"], ["rmsR", "number"]] },
   InputMeter: { op: 3, fields: [["track", "number"], ["peakL", "number"], ["peakR", "number"]] },
   CaptureOverrun: { op: 4, fields: [["track", "number"]] },
+  DeviceMeter: { op: 5, fields: [["device", "number"], ["reduction", "number"]] },
 } as const satisfies Record<string, MessageLayout>;
 

@@ -1,5 +1,16 @@
-import type { AudioPlatform, TunePlan } from "@tessera/platform";
-import type { Clip, Command, Project, Track } from "@tessera/schema";
+import type { AudioPlatform, AutomationTarget, TunePlan } from "@tessera/platform";
+import {
+  type Clip,
+  type Command,
+  DEVICES,
+  type Device,
+  type DeviceKind,
+  type Lane,
+  MASTER_TRACK,
+  MAX_SENDS,
+  type Project,
+  type Track,
+} from "@tessera/schema";
 
 /** Crossfade where a tuned clip's segments meet (must match `tune::CROSSFADE`). */
 const TUNE_CROSSFADE_SECONDS = 0.01;
@@ -22,8 +33,11 @@ export class EngineSync {
   private readonly sentClips = new Map<number, number[]>();
   private engineRate: number;
 
+  /** What was last sent for each automation lane (to resend only what changed). */
+  private readonly sentLanes = new Map<number, { key: unknown[]; track: number }>();
+
   constructor(
-    private readonly platform: Pick<AudioPlatform, "send">,
+    private readonly platform: Pick<AudioPlatform, "send" | "setAutomation">,
     engineRate: number,
   ) {
     this.engineRate = engineRate;
@@ -85,13 +99,48 @@ export class EngineSync {
 
   sync(next: Project) {
     for (const command of diffProject(this.synced, next, this)) this.send(command);
+    this.syncLanes(next);
     this.synced = next;
   }
 
   /** Sends the whole project again (after something else changed engine state directly). */
   resend(project: Project) {
     this.synced = undefined;
+    this.sentLanes.clear();
     this.sync(project);
+  }
+
+  /**
+   * Sends automation lanes that changed (points, target, or how the target maps to the
+   * engine), and removes lanes that are gone. Lanes whose target can't be resolved (unknown
+   * device kind) are removed from the engine.
+   */
+  private syncLanes(project: Project) {
+    const seen = new Set<number>();
+    for (const track of project.tracks) {
+      for (const lane of track.automation) {
+        seen.add(lane.id);
+        const target = engineTarget(track, lane);
+        const key = [lane, target?.kind, target?.index, target?.device, this.engineRate, project.sampleRate];
+        const sent = this.sentLanes.get(lane.id);
+        if (sent && sent.track === track.id && sent.key.every((k, i) => k === key[i])) continue;
+        this.sentLanes.set(lane.id, { key, track: track.id });
+        if (!target || lane.points.length === 0) {
+          if (sent) this.send({ type: "RemoveAutomation", lane: lane.id });
+          continue;
+        }
+        const points = lane.points.map((pt): [number, number] => [
+          this.toEngine(pt.frame, project),
+          pt.value,
+        ]);
+        this.platform.setAutomation(lane.id, track.id, target, points);
+      }
+    }
+    for (const id of [...this.sentLanes.keys()]) {
+      if (seen.has(id)) continue;
+      this.sentLanes.delete(id);
+      this.send({ type: "RemoveAutomation", lane: id });
+    }
   }
 
   /**
@@ -101,6 +150,10 @@ export class EngineSync {
    */
   reset() {
     for (const track of this.synced?.tracks ?? []) this.send({ type: "RemoveTrack", track: track.id });
+    for (const device of this.synced?.masterInserts ?? [])
+      this.send({ type: "RemoveDevice", device: device.id });
+    for (const lane of this.sentLanes.keys()) this.send({ type: "RemoveAutomation", lane });
+    this.sentLanes.clear();
     for (const engineId of this.engineSources.values()) this.send({ type: "RemoveSource", source: engineId });
     this.engineSources.clear();
     this.tunePlans.clear();
@@ -248,6 +301,30 @@ export function diffProject(prev: Project | undefined, next: Project, sync: Engi
     }
   }
 
+  // Routing (after every track exists, so outputs and sends resolve).
+  for (const track of next.tracks) {
+    const old = prevTracks.get(track.id);
+    if (old ? old.output !== track.output : track.output !== null)
+      out.push({ type: "SetTrackOutput", track: track.id, output: track.output ?? MASTER_TRACK });
+    if (old?.sends !== track.sends) {
+      const count = Math.max(track.sends.length, old?.sends.length ?? 0);
+      for (let index = 0; index < Math.min(count, MAX_SENDS); index++) {
+        const send = track.sends[index];
+        if (send && old?.sends[index] === send) continue;
+        out.push({
+          type: "SetSend",
+          track: track.id,
+          index,
+          enabled: send !== undefined,
+          target: send?.target ?? 0,
+          gain: send?.gain ?? 0,
+          pre: send?.pre ?? false,
+        });
+      }
+    }
+  }
+  diffDevices(prev, next, out);
+
   for (const [id, { track, clip }] of nextClips) {
     const old = prevClips.get(id);
     // Immer keeps unchanged objects identical, so reference checks are exact.
@@ -271,4 +348,75 @@ function clipIndex(project: Project | undefined) {
   for (const track of project?.tracks ?? [])
     for (const clip of track.clips) map.set(clip.id, { track, clip });
   return map;
+}
+
+const deviceInfo = (kind: string) => DEVICES[kind as DeviceKind] as (typeof DEVICES)[DeviceKind] | undefined;
+
+/**
+ * Commands that turn the previous insert chains (tracks and master) into the next ones.
+ * Devices of unknown kinds (from a newer version) are never in the engine: they are left out
+ * of both sides, so a device whose kind becomes unknown is removed, and positions count only
+ * the devices the engine has.
+ */
+function diffDevices(prev: Project | undefined, next: Project, out: Command[]) {
+  const chains = (p: Project | undefined): [number, Device[], Device[]][] =>
+    p
+      ? [[MASTER_TRACK, p.masterInserts] as const, ...p.tracks.map((t) => [t.id, t.inserts] as const)].map(
+          ([owner, chain]) => [owner, chain, chain.filter((d) => deviceInfo(d.kind))],
+        )
+      : [];
+  const before = new Map<number, { owner: number; index: number; device: Device }>();
+  const prevChains = new Map(chains(prev).map(([owner, chain]) => [owner, chain]));
+  for (const [owner, , known] of chains(prev))
+    known.forEach((device, index) => before.set(device.id, { owner, index, device }));
+  const nextChains = chains(next);
+  const after = new Set(nextChains.flatMap(([, , known]) => known.map((d) => d.id)));
+  for (const id of before.keys()) if (!after.has(id)) out.push({ type: "RemoveDevice", device: id });
+
+  for (const [owner, chain, known] of nextChains) {
+    if (prevChains.get(owner) === chain) continue;
+    // Place each device at its index in turn; earlier positions are then already right.
+    let reordered = false;
+    known.forEach((device, index) => {
+      const info = deviceInfo(device.kind)!;
+      const old = before.get(device.id);
+      const fresh = !old || old.device.kind !== device.kind;
+      if (fresh) {
+        out.push({ type: "AddDevice", device: device.id, track: owner, position: index, kind: info.code });
+        reordered = true;
+      } else if (reordered || old.owner !== owner || old.index !== index) {
+        out.push({ type: "MoveDevice", device: device.id, track: owner, position: index });
+        reordered = true;
+      }
+      if (!fresh && old.device === device) return;
+      if (fresh ? device.bypass : old.device.bypass !== device.bypass)
+        out.push({ type: "SetDeviceBypass", device: device.id, bypass: device.bypass });
+      info.params.forEach((param, i) => {
+        const value = device.params[param.id] ?? param.default;
+        const was = fresh ? param.default : (old.device.params[param.id] ?? param.default);
+        if (value !== was) out.push({ type: "SetDeviceParam", device: device.id, param: i, value });
+      });
+    });
+  }
+}
+
+/** How the engine addresses a lane's target, or undefined if it can't be resolved. */
+function engineTarget(track: Track, lane: Lane): AutomationTarget | undefined {
+  const t = lane.target;
+  switch (t.kind) {
+    case "volume":
+      return { kind: 0, index: 0, device: 0 };
+    case "pan":
+      return { kind: 1, index: 0, device: 0 };
+    case "send": {
+      const index = track.sends.findIndex((s) => s.id === t.send);
+      return index >= 0 && index < MAX_SENDS ? { kind: 2, index, device: 0 } : undefined;
+    }
+    case "param": {
+      const device = track.inserts.find((d) => d.id === t.device);
+      const info = device && deviceInfo(device.kind);
+      const index = info?.params.findIndex((p) => p.id === t.param) ?? -1;
+      return index >= 0 ? { kind: 3, index, device: t.device } : undefined;
+    }
+  }
 }

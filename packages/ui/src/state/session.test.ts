@@ -50,6 +50,7 @@ function fakePlatform(engineRate: number, saved: Project, takes: RecordedTake[] 
       plan: async () => ({ segments: [], outputFrames: 0, sources: {} }),
       close: async () => {},
     },
+    setAutomation: () => {},
     send: (c) => void sent.push(c),
     onEvent: (listener) => {
       emit = listener;

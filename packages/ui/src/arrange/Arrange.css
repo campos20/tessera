@@ -321,3 +321,63 @@
   color: var(--record);
   cursor: pointer;
 }
+
+.arrange .lane-header {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  position: relative;
+  box-sizing: border-box;
+  padding: 4px 8px 4px 22px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid #2a2a2e;
+  background: #19191c;
+  font-size: 11px;
+}
+
+.arrange .lane-name {
+  overflow: hidden;
+  color: var(--text-dim);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.arrange .lane-value {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.arrange .lane-buttons {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+}
+
+.arrange .lane-buttons button {
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel-raised);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+}
+
+.arrange .automation-lane {
+  display: block;
+  touch-action: none;
+}
+
+.arrange .bus-tag {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #2a2a33;
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}

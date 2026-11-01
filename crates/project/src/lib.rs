@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Current saved-document version.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Unit of all timeline positions and lengths in a project.
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
@@ -36,8 +36,10 @@ pub struct Project {
     #[serde(rename = "loop")]
     pub loop_region: LoopRegion,
     pub tracks: Vec<Track>,
+    /// Insert chain of the master bus (before the master fader).
+    pub master_inserts: Vec<Device>,
     pub sources: Vec<Source>,
-    /// Next id to hand out for tracks, clips and sources (one shared counter).
+    /// Next id to hand out for every object with an id (one shared counter).
     pub next_id: u32,
     /// ISO 8601 timestamps, set by the UI.
     pub created_at: String,
@@ -79,7 +81,97 @@ pub struct Track {
     pub input_channel: u32,
     /// Record `input_channel` and `input_channel + 1` as a stereo pair.
     pub input_stereo: bool,
+    pub kind: TrackKind,
+    /// Bus track this track feeds; `None` for the master.
+    pub output: Option<u32>,
+    pub sends: Vec<TrackSend>,
+    pub inserts: Vec<Device>,
+    pub automation: Vec<Lane>,
     pub clips: Vec<Clip>,
+}
+
+/// Audio tracks hold clips; buses only mix other tracks (outputs and sends).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum TrackKind {
+    Audio,
+    Bus,
+}
+
+/// Most sends a track can have.
+pub const MAX_SENDS: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, rename = "Send"))]
+pub struct TrackSend {
+    pub id: u32,
+    /// Bus track receiving the send.
+    pub target: u32,
+    /// Linear gain.
+    pub gain: f32,
+    /// Taken before the track's fader and pan.
+    pub pre: bool,
+}
+
+/// A built-in device in an insert chain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Device {
+    pub id: u32,
+    /// Device type id (`"eq"`, `"compressor"`, …). Unknown kinds load and stay bypassed.
+    pub kind: String,
+    pub bypass: bool,
+    /// Parameter values by parameter id; missing parameters use their default.
+    #[cfg_attr(feature = "ts", ts(type = "Record<string, number>"))]
+    pub params: std::collections::BTreeMap<String, f32>,
+}
+
+/// An automation lane: breakpoints with linear ramps between them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Lane {
+    pub id: u32,
+    pub target: LaneTarget,
+    /// Sorted by frame.
+    pub points: Vec<AutomationPoint>,
+    /// Shown under the track in the arrange view.
+    pub visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub enum LaneTarget {
+    /// Track fader (linear gain).
+    Volume,
+    Pan,
+    /// Level of the send with this id.
+    Send {
+        send: u32,
+    },
+    /// Parameter `param` of device `device` in this track's inserts.
+    Param {
+        device: u32,
+        param: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct AutomationPoint {
+    /// Timeline frame at [`PROJECT_SAMPLE_RATE`].
+    pub frame: u64,
+    /// In the target's unit (linear gain, pan −1…1, or the parameter's plain value).
+    pub value: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -160,7 +252,28 @@ impl std::error::Error for ProjectError {}
 pub type Migration = fn(&mut Value) -> Result<(), String>;
 
 /// `MIGRATIONS[i]` upgrades version `i + 1` to `i + 2`. Empty while only v1 exists.
-pub const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3];
+pub const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3, v3_to_v4];
+
+/// v4 (M5): tracks become audio tracks routed to the master with no sends, inserts or
+/// automation; the master gets an empty insert chain.
+fn v3_to_v4(project: &mut Value) -> Result<(), String> {
+    let obj = project.as_object_mut().ok_or("project is not an object")?;
+    obj.entry("masterInserts")
+        .or_insert(Value::Array(Vec::new()));
+    let tracks = obj
+        .get_mut("tracks")
+        .and_then(Value::as_array_mut)
+        .ok_or("missing tracks")?;
+    for track in tracks {
+        let track = track.as_object_mut().ok_or("track is not an object")?;
+        track.entry("kind").or_insert(Value::from("audio"));
+        track.entry("output").or_insert(Value::Null);
+        for key in ["sends", "inserts", "automation"] {
+            track.entry(key).or_insert(Value::Array(Vec::new()));
+        }
+    }
+    Ok(())
+}
 
 /// v3 (M4): clips gain optional Tune edits; existing clips have none.
 fn v2_to_v3(project: &mut Value) -> Result<(), String> {
@@ -266,8 +379,66 @@ impl Project {
         for source in &self.sources {
             check_id("source", source.id, &mut issues);
         }
+        for device in &self.master_inserts {
+            check_id("device", device.id, &mut issues);
+        }
+        let is_bus = |id: u32| {
+            self.tracks
+                .iter()
+                .any(|t| t.id == id && t.kind == TrackKind::Bus)
+        };
         for track in &self.tracks {
             check_id("track", track.id, &mut issues);
+            if track.kind == TrackKind::Bus && !track.clips.is_empty() {
+                issues.push(format!("bus {} has clips", track.id));
+            }
+            if let Some(out) = track.output
+                && (out == track.id || !is_bus(out))
+            {
+                issues.push(format!(
+                    "track {} outputs to {out}, which is not a bus",
+                    track.id
+                ));
+            }
+            if track.sends.len() > MAX_SENDS {
+                issues.push(format!(
+                    "track {} has more than {MAX_SENDS} sends",
+                    track.id
+                ));
+            }
+            for send in &track.sends {
+                check_id("send", send.id, &mut issues);
+                if send.target == track.id || !is_bus(send.target) {
+                    issues.push(format!(
+                        "send {} targets {}, which is not a bus",
+                        send.id, send.target
+                    ));
+                }
+                if !send.gain.is_finite() {
+                    issues.push(format!("send {} has an invalid gain", send.id));
+                }
+            }
+            for device in &track.inserts {
+                check_id("device", device.id, &mut issues);
+            }
+            for lane in &track.automation {
+                check_id("lane", lane.id, &mut issues);
+                let valid = match &lane.target {
+                    LaneTarget::Volume | LaneTarget::Pan => true,
+                    LaneTarget::Send { send } => track.sends.iter().any(|s| s.id == *send),
+                    LaneTarget::Param { device, .. } => {
+                        track.inserts.iter().any(|d| d.id == *device)
+                    }
+                };
+                if !valid {
+                    issues.push(format!("lane {} targets something missing", lane.id));
+                }
+                if lane.points.iter().any(|p| !p.value.is_finite())
+                    || lane.points.windows(2).any(|w| w[1].frame < w[0].frame)
+                {
+                    issues.push(format!("lane {} has invalid points", lane.id));
+                }
+            }
             for clip in &track.clips {
                 check_id("clip", clip.id, &mut issues);
                 match self.sources.iter().find(|s| s.id == clip.source_id) {
@@ -363,6 +534,11 @@ mod tests {
                 solo: false,
                 input_channel: 0,
                 input_stereo: false,
+                kind: TrackKind::Audio,
+                output: None,
+                sends: vec![],
+                inserts: vec![],
+                automation: vec![],
                 clips: vec![Clip {
                     id: 3,
                     source_id: 1,
@@ -376,6 +552,7 @@ mod tests {
                     tune: None,
                 }],
             }],
+            master_inserts: vec![],
             sources: vec![Source {
                 id: 1,
                 name: "take.wav".into(),
@@ -519,6 +696,101 @@ mod tests {
             key: None,
         });
         assert!(p.validate().iter().any(|i| i.contains("invalid tune note")));
+    }
+
+    #[test]
+    fn migrates_v3_projects_to_v4() {
+        let mut v3 = serde_json::to_value(sample()).unwrap();
+        v3["schemaVersion"] = Value::from(3);
+        v3.as_object_mut().unwrap().remove("masterInserts");
+        for key in ["kind", "output", "sends", "inserts", "automation"] {
+            v3["tracks"][0].as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(load(&v3.to_string()).unwrap(), sample());
+    }
+
+    #[test]
+    fn validates_routing_devices_and_lanes() {
+        let mut p = sample();
+        let mut bus = p.tracks[0].clone();
+        bus.id = 10;
+        bus.kind = TrackKind::Bus;
+        bus.clips.clear();
+        p.tracks.push(bus);
+        p.next_id = 20;
+        p.tracks[0].output = Some(10);
+        p.tracks[0].sends.push(TrackSend {
+            id: 11,
+            target: 10,
+            gain: 0.5,
+            pre: false,
+        });
+        p.tracks[0].inserts.push(Device {
+            id: 12,
+            kind: "eq".into(),
+            bypass: false,
+            params: [("b1Gain".to_string(), 3.0)].into(),
+        });
+        p.tracks[0].automation = vec![
+            Lane {
+                id: 13,
+                target: LaneTarget::Param {
+                    device: 12,
+                    param: "b1Gain".into(),
+                },
+                points: vec![
+                    AutomationPoint {
+                        frame: 0,
+                        value: 0.0,
+                    },
+                    AutomationPoint {
+                        frame: 100,
+                        value: 6.0,
+                    },
+                ],
+                visible: true,
+            },
+            Lane {
+                id: 14,
+                target: LaneTarget::Send { send: 11 },
+                points: vec![],
+                visible: false,
+            },
+        ];
+        assert!(p.validate().is_empty(), "{:?}", p.validate());
+        let json = save(&p);
+        assert!(json.contains("\"kind\": \"param\""), "{json}");
+        assert_eq!(load(&json).unwrap(), p);
+
+        let mut bad = p.clone();
+        bad.tracks[0].output = Some(2); // itself
+        bad.tracks[0].sends[0].target = 2;
+        bad.tracks[0].automation[0].target = LaneTarget::Send { send: 99 };
+        bad.tracks[0].automation[1].points = vec![
+            AutomationPoint {
+                frame: 9,
+                value: 0.0,
+            },
+            AutomationPoint {
+                frame: 3,
+                value: 0.0,
+            },
+        ];
+        bad.tracks[1].clips = p.tracks[0].clips.clone();
+        bad.tracks[1].clips[0].id = 15;
+        let issues = bad.validate();
+        for needle in [
+            "outputs to 2",
+            "send 11 targets 2",
+            "lane 13 targets something missing",
+            "lane 14 has invalid points",
+            "bus 10 has clips",
+        ] {
+            assert!(
+                issues.iter().any(|i| i.contains(needle)),
+                "{needle}: {issues:?}"
+            );
+        }
     }
 
     #[test]

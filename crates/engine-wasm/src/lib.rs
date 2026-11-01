@@ -39,6 +39,8 @@ pub struct Handle {
     command_args: [f64; MAX_ARGS],
     /// Arguments of the event returned by [`tessera_poll_event`].
     event_args: [f64; MAX_ARGS],
+    /// `[frame, value]` pairs written by JS before [`tessera_automation_commit`].
+    automation: Vec<f64>,
 }
 
 /// A source being filled by JS before it is handed to the engine.
@@ -70,6 +72,7 @@ pub extern "C" fn tessera_create(sample_rate: f32) -> *mut Handle {
         out_r: vec![0.0; MAX_FRAMES],
         command_args: [0.0; MAX_ARGS],
         event_args: [0.0; MAX_ARGS],
+        automation: Vec::new(),
     };
     Box::into_raw(Box::new(handle))
 }
@@ -109,7 +112,9 @@ pub unsafe extern "C" fn tessera_command(handle: *mut Handle, op: u32) -> u32 {
         op,
         args: h.command_args,
     }) {
-        Some(command) => h.controller.send(command).is_ok() as u32,
+        // Called from `process()`: never allocate (device state comes via
+        // `tessera_device_create`).
+        Some(command) => h.controller.queue(command).is_ok() as u32,
         None => 0,
     }
 }
@@ -327,8 +332,72 @@ pub unsafe extern "C" fn tessera_source_discard(pending: *mut PendingSource) {
     }
 }
 
+/// Creates the DSP state of device `device` (a `DeviceKind` code) and queues it for the
+/// engine; pair it with an `AddDevice` command. Allocates: call from the worklet's message
+/// handler, never from `process()`. Returns 1 on success.
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`tessera_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tessera_device_create(handle: *mut Handle, device: u32, kind: u32) -> u32 {
+    // SAFETY: caller guarantees `handle` is null or live.
+    unsafe { handle.as_mut() }.map_or(0, |h| h.controller.create_device(device, kind) as u32)
+}
+
+/// Room for `points` automation points as `[frame, value]` `f64` pairs; JS fills it before
+/// [`tessera_automation_commit`]. Allocates: message handler only. Null if `handle` is null.
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`tessera_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tessera_automation_points(handle: *mut Handle, points: u32) -> *mut f64 {
+    // SAFETY: caller guarantees `handle` is null or live.
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return core::ptr::null_mut();
+    };
+    h.automation.clear();
+    h.automation.resize(points as usize * 2, 0.0);
+    h.automation.as_mut_ptr()
+}
+
+/// Sets automation lane `lane` on `track` from the points in [`tessera_automation_points`]
+/// (`points` of them; none removes the lane). The target is `kind` 0 = volume, 1 = pan,
+/// 2 = send `index`, 3 = parameter `index` of `device`. Returns 1 on success.
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`tessera_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tessera_automation_commit(
+    handle: *mut Handle,
+    points: u32,
+    lane: u32,
+    track: u32,
+    kind: u32,
+    index: u32,
+    device: u32,
+) -> u32 {
+    // SAFETY: caller guarantees `handle` is null or live.
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return 0;
+    };
+    let Some(target) = engine_core::automation::AutomationTarget::from_parts(kind, index, device)
+    else {
+        return 0;
+    };
+    let n = (points as usize).min(h.automation.len() / 2);
+    let envelope = engine_core::automation::Envelope::new(
+        h.automation[..n * 2]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .filter(|[frame, _]| frame.is_finite() && *frame >= 0.0)
+            .map(|&[frame, value]| (frame as u64, value as f32)),
+    );
+    h.controller.set_automation(lane, track, target, envelope) as u32
+}
+
 /// Frees audio the engine has released. Call from the worklet's message handler, never
-/// from `process()`. Returns the number of buffers freed.
+/// from `process()`. Returns the number of items freed.
 ///
 /// # Safety
 /// `handle` must be null or a live pointer from [`tessera_create`].

@@ -12,9 +12,18 @@ export interface TransportBarProps {
   snap: boolean;
   onToggleSnap: () => void;
   onZoom: (factor: number) => void;
+  mixer: boolean;
+  onToggleMixer: () => void;
 }
 
-export function TransportBar({ snap, onToggleSnap, onZoom, onOpenSettings }: TransportBarProps) {
+export function TransportBar({
+  snap,
+  onToggleSnap,
+  onZoom,
+  onOpenSettings,
+  mixer,
+  onToggleMixer,
+}: TransportBarProps) {
   const session = useSession();
   const edit = useProject((s) => s.edit);
   const tempo = useProject((s) => s.project.tempo);
@@ -131,6 +140,15 @@ export function TransportBar({ snap, onToggleSnap, onZoom, onOpenSettings }: Tra
       </div>
 
       <div className="view-group">
+        <button
+          className={mixer ? "icon-button toggle on wide" : "icon-button toggle wide"}
+          onClick={onToggleMixer}
+          aria-pressed={mixer}
+          aria-label="Mixer"
+          title="Mixer (X)"
+        >
+          Mixer
+        </button>
         <button
           className="icon-button"
           onClick={onOpenSettings}

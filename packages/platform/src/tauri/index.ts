@@ -15,6 +15,7 @@ import type { RecordedTake as NativeTake } from "@tessera/schema";
 import type {
   AudioPlatform,
   AudioSettings,
+  AutomationTarget,
   Diagnostics,
   EngineEventListener,
   EngineInfo,
@@ -54,7 +55,8 @@ export class TauriPlatform implements AudioPlatform {
 
   private starting: Promise<EngineInfo> | undefined;
   private started = false;
-  private pending: Command[] = [];
+  /** Engine calls made before the engine started, replayed in order. */
+  private pending: (() => void)[] = [];
   private readonly listeners = new Set<EngineEventListener>();
   private readonly progressListeners = new Set<(p: TakeProgress) => void>();
   private readonly xrunListeners = new Set<(count: number) => void>();
@@ -70,10 +72,20 @@ export class TauriPlatform implements AudioPlatform {
 
   send(command: Command): void {
     if (!this.started) {
-      this.pending.push(command);
+      this.pending.push(() => this.send(command));
       return;
     }
     invoke("audio_send", { command }).catch((e: unknown) => console.error("tessera: audio_send failed", e));
+  }
+
+  setAutomation(lane: number, track: number, target: AutomationTarget, points: [number, number][]): void {
+    if (!this.started) {
+      this.pending.push(() => this.setAutomation(lane, track, target, points));
+      return;
+    }
+    invoke("audio_automation", { lane, track, ...target, points }).catch((e: unknown) =>
+      console.error("tessera: audio_automation failed", e),
+    );
   }
 
   onEvent(listener: EngineEventListener): () => void {
@@ -179,7 +191,7 @@ export class TauriPlatform implements AudioPlatform {
   private flushPending() {
     const pending = this.pending;
     this.pending = [];
-    for (const command of pending) this.send(command);
+    for (const call of pending) call();
   }
 }
 
