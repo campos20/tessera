@@ -14,8 +14,12 @@ static ALLOCATOR: AllocDisabler = AllocDisabler;
 #[test]
 fn stress_64_tracks_random_commands() {
     let (mut engine, mut ctl) = Engine::new(SR as f32);
+    let mut capture = ctl.take_capture().unwrap();
     let mut rng = Lcg(42);
     let mut out = vec![0.0f32; 512 * 2];
+    let input: Vec<f32> = (0..512 * 2)
+        .map(|i| (i as f32 * 0.01).sin() * 0.1)
+        .collect();
     let source_frames = SR as usize / 2;
 
     for t in 0..64u32 {
@@ -53,7 +57,31 @@ fn stress_64_tracks_random_commands() {
         // Prepared off the "audio thread": allocation is fine here.
         for _ in 0..8 {
             let id = rng.next_u32() % 80;
-            let cmd = match rng.next_u32() % 14 {
+            let cmd = match rng.next_u32() % 20 {
+                14 => Command::SetTrackArm {
+                    track: id,
+                    armed: rng.next_u32().is_multiple_of(2),
+                },
+                15 => Command::SetTrackInput {
+                    track: id,
+                    channel: rng.next_u32() % 3,
+                    stereo: rng.next_u32().is_multiple_of(2),
+                },
+                16 => Command::SetTrackMonitor {
+                    track: id,
+                    monitor: rng.next_u32().is_multiple_of(3),
+                },
+                17 => Command::SetRecord {
+                    enabled: !rng.next_u32().is_multiple_of(4),
+                },
+                18 => Command::SetPunch {
+                    enabled: rng.next_u32().is_multiple_of(2),
+                    start: 2_000,
+                    end: 15_000,
+                },
+                19 => Command::SetCountIn {
+                    frames: u64::from(rng.next_u32() % 3) * 4_000,
+                },
                 0 => Command::SetTrackGain {
                     track: id,
                     gain: rng.next_f32().abs(),
@@ -111,11 +139,12 @@ fn stress_64_tracks_random_commands() {
 
         assert_no_alloc(|| {
             for _ in 0..4 {
-                engine.process(&mut out, 2);
+                engine.process_io(&input, 2, &mut out, 2);
             }
         });
 
         while ctl.poll_event().is_some() {}
+        while capture.pop().is_ok() {}
         ctl.collect_garbage();
     }
     assert!(out.iter().all(|s| s.is_finite()));

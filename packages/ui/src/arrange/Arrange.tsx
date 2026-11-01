@@ -14,6 +14,7 @@ import { SILENT } from "../Meter";
 import {
   addTrack,
   moveClips,
+  removeTrack,
   moveTrack,
   setClipGain,
   setFade,
@@ -21,7 +22,7 @@ import {
   trimClipStart,
   updateTrack,
 } from "../model/edits";
-import { useProject, useSession, useTransport } from "../state/hooks";
+import { useProject, useRecording, useSession, useTransport } from "../state/hooks";
 import { CURSORS, type ClipPart, hitTestClip } from "./hitTest";
 import { Ruler } from "./Ruler";
 import {
@@ -70,6 +71,11 @@ export function Arrange({ view, onView, snap }: ArrangeProps) {
   const peaks = useProject((s) => s.peaks);
   const selection = useProject((s) => s.selection);
   const meters = useTransport((s) => s.tracks);
+  const inputMeters = useTransport((s) => s.inputs);
+  const armed = useRecording((s) => s.armed);
+  const monitored = useRecording((s) => s.monitored);
+  const live = useRecording((s) => s.live);
+  const inputChannels = useRecording((s) => s.engine?.inputChannels ?? 0);
 
   const root = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -322,6 +328,14 @@ export function Arrange({ view, onView, snap }: ArrangeProps) {
                 onChange={(patch, phase, label) => changeTrack(track.id, patch, phase, label)}
                 onSelect={() => store.getState().select({ track: track.id })}
                 onReorder={(rows, phase) => reorderTrack(track.id, i, rows, phase)}
+                armed={armed.has(track.id)}
+                monitored={monitored.has(track.id)}
+                inputMeter={inputMeters.get(track.id) ?? SILENT}
+                inputChannels={inputChannels}
+                onArm={() => void session.toggleArm(track.id)}
+                onMonitor={() => void session.toggleMonitor(track.id)}
+                onInput={(channel, stereo) => session.setTrackInput(track.id, channel, stereo)}
+                onDelete={() => store.getState().edit("Delete track", (p) => removeTrack(p, track.id))}
               />
               <TrackLane
                 track={track}
@@ -333,6 +347,7 @@ export function Arrange({ view, onView, snap }: ArrangeProps) {
                 selected={selection.clips}
                 loop={project.loop}
                 alternate={i % 2 === 1}
+                live={live.get(track.id)}
                 onPointerDown={(e) => onLanePointerDown(e, track.id)}
                 onPointerMove={(e) => onLanePointerMove(e, track.id)}
                 onPointerUp={onLanePointerUp}

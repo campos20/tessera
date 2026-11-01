@@ -22,6 +22,14 @@ export interface WorkerExports {
   bytes_result_ptr(handle: number): number;
   bytes_result_len(handle: number): number;
   bytes_result_free(handle: number): void;
+  calibration_measure(
+    samples: number,
+    frames: number,
+    sampleRate: number,
+    bpm: number,
+    maxLag: number,
+    out: number,
+  ): number;
 }
 
 export interface DecodedAudio {
@@ -147,6 +155,30 @@ export function unpackArchive(m: WorkerExports, bytes: Uint8Array): ArchiveEntry
     pos += 4 + dataLen;
   }
   return entries;
+}
+
+/**
+ * Measures round-trip latency from a mono calibration take recorded from timeline frame 0
+ * while the metronome played at `bpm`. `null` when nothing recognizable was recorded.
+ */
+export function measureLatency(
+  m: WorkerExports,
+  samples: Float32Array,
+  sampleRate: number,
+  bpm: number,
+): { frames: number; confidence: number } | null {
+  const bytes = new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength);
+  const ptr = m.worker_alloc(bytes.length);
+  new Uint8Array(m.memory.buffer, ptr, bytes.length).set(bytes);
+  const out = m.worker_alloc(16);
+  try {
+    const ok = m.calibration_measure(ptr, samples.length, sampleRate, bpm, Math.round(sampleRate / 2), out);
+    const [frames, confidence] = new Float64Array(m.memory.buffer.slice(out, out + 16));
+    return ok ? { frames: frames!, confidence: confidence! } : null;
+  } finally {
+    m.worker_free(ptr, bytes.length);
+    m.worker_free(out, 16);
+  }
 }
 
 /** Lowercased file extension used as a decoder hint (the content is probed regardless). */

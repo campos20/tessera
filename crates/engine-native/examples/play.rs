@@ -2,7 +2,7 @@
 //! `cargo run -p engine-native --example play -- path/to/file.wav [seconds]`.
 
 use engine_core::{Command, Event};
-use engine_native::{AudioOutput, import_source};
+use engine_native::{AudioIo, import_source};
 
 #[cfg(debug_assertions)]
 #[global_allocator]
@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = args.next().ok_or("usage: play <file> [seconds]")?;
     let seconds: f64 = args.next().map_or(Ok(3.0), |s| s.parse())?;
 
-    let mut output = AudioOutput::start_default()?;
+    let mut output = AudioIo::start_default()?;
     let rate = output.info().sample_rate;
     println!("{:?}", output.info());
     let (info, buffer) = import_source(1, &path, std::fs::read(&path)?, rate)?;
@@ -49,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             match event {
                 Event::MasterMeter { peak_l, peak_r, .. } => peak = peak.max(peak_l).max(peak_r),
                 Event::Transport { position: p, .. } => position = p,
-                Event::TrackMeter { .. } => {}
+                _ => {}
             }
         }
     }

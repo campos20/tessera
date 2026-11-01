@@ -1,5 +1,5 @@
 import type { Track } from "@tessera/schema";
-import { type ChangeEvent, type PointerEvent, useRef, useState } from "react";
+import { type ChangeEvent, type PointerEvent, useEffect, useRef, useState } from "react";
 import { Meter, type MeterReading } from "../Meter";
 import { TRACK_COLORS } from "../model/colors";
 
@@ -12,6 +12,16 @@ export interface TrackHeaderProps {
   height: number;
   meter: MeterReading;
   selected: boolean;
+  armed: boolean;
+  monitored: boolean;
+  /** Input level, shown instead of the output meter while armed or monitored. */
+  inputMeter: MeterReading;
+  /** Channels of the open input (0 when none is open yet). */
+  inputChannels: number;
+  onArm: () => void;
+  onMonitor: () => void;
+  onInput: (channel: number, stereo: boolean) => void;
+  onDelete: () => void;
   onChange: (patch: TrackPatch, phase: ChangePhase, label: string) => void;
   onSelect: () => void;
   /** Dragging the header reorders tracks; `rows` is the offset from the starting row. */
@@ -23,17 +33,11 @@ const gainToDb = (gain: number) => (gain <= 0 ? MIN_DB : Math.max(MIN_DB, 20 * M
 const dbToGain = (db: number) => (db <= MIN_DB ? 0 : 10 ** (db / 20));
 const DRAG_THRESHOLD_PX = 6;
 
-export function TrackHeader({
-  track,
-  height,
-  meter,
-  selected,
-  onChange,
-  onSelect,
-  onReorder,
-}: TrackHeaderProps) {
+export function TrackHeader(props: TrackHeaderProps) {
+  const { track, height, meter, selected, armed, monitored, onChange, onSelect, onReorder } = props;
   const db = gainToDb(track.gain);
   const [editing, setEditing] = useState(false);
+  const [menu, setMenu] = useState(false);
   const drag = useRef<{ y: number; active: boolean } | null>(null);
 
   const slider = (label: string, toPatch: (value: number) => TrackPatch) => ({
@@ -110,6 +114,15 @@ export function TrackHeader({
             </span>
           )}
           <button
+            className={armed ? "ms arm on" : "ms arm"}
+            aria-pressed={armed}
+            aria-label="Arm for recording"
+            title="Arm for recording"
+            onClick={props.onArm}
+          >
+            ●
+          </button>
+          <button
             className={track.mute ? "ms mute on" : "ms mute"}
             aria-pressed={track.mute}
             aria-label="Mute"
@@ -125,6 +138,25 @@ export function TrackHeader({
           >
             S
           </button>
+          <button
+            className="ms more"
+            aria-label="Track options"
+            aria-expanded={menu}
+            onClick={() => setMenu(!menu)}
+          >
+            ⋯
+          </button>
+          {menu && (
+            <TrackMenu
+              track={track}
+              monitored={monitored}
+              inputChannels={props.inputChannels}
+              onClose={() => setMenu(false)}
+              onMonitor={props.onMonitor}
+              onInput={props.onInput}
+              onDelete={props.onDelete}
+            />
+          )}
         </div>
         <div className="header-row controls">
           <input
@@ -157,8 +189,75 @@ export function TrackHeader({
             }
           />
         </div>
-        <Meter reading={meter} testId={`track-meter-${track.id}`} />
+        {armed || monitored ? (
+          <div className="input-meter" title="Input level">
+            <Meter reading={props.inputMeter} testId={`input-meter-${track.id}`} />
+          </div>
+        ) : (
+          <Meter reading={meter} testId={`track-meter-${track.id}`} />
+        )}
       </div>
+    </div>
+  );
+}
+
+/** Input routing and less frequent track actions. */
+function TrackMenu(p: {
+  track: Track;
+  monitored: boolean;
+  inputChannels: number;
+  onClose: () => void;
+  onMonitor: () => void;
+  onInput: (channel: number, stereo: boolean) => void;
+  onDelete: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const { onClose } = p;
+  useEffect(() => {
+    const close = (e: globalThis.PointerEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [onClose]);
+  // Offer at least two channels so the input can be chosen before the device is open.
+  const channels = Math.max(2, p.inputChannels);
+  const options: { label: string; channel: number; stereo: boolean }[] = [];
+  for (let c = 0; c < channels; c++) options.push({ label: `In ${c + 1}`, channel: c, stereo: false });
+  for (let c = 0; c + 1 < channels; c += 2)
+    options.push({ label: `In ${c + 1}+${c + 2}`, channel: c, stereo: true });
+  return (
+    <div className="track-menu" ref={ref} role="menu" onPointerDown={(e) => e.stopPropagation()}>
+      <label>
+        Input
+        <select
+          value={`${p.track.inputChannel}:${p.track.inputStereo}`}
+          aria-label="Input"
+          onChange={(e) => {
+            const [channel, stereo] = e.target.value.split(":");
+            p.onInput(Number(channel), stereo === "true");
+          }}
+        >
+          {options.map((o) => (
+            <option key={`${o.channel}:${o.stereo}`} value={`${o.channel}:${o.stereo}`}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <input type="checkbox" checked={p.monitored} onChange={p.onMonitor} aria-label="Monitor input" />
+        Monitor input
+      </label>
+      <button
+        className="danger"
+        onClick={() => {
+          p.onClose();
+          p.onDelete();
+        }}
+      >
+        Delete track
+      </button>
     </div>
   );
 }

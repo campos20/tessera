@@ -4,7 +4,8 @@
  * REAL-TIME: nothing in `process()` may allocate. Views over WASM memory are only rebuilt
  * when the memory has grown, which only happens in the message handler (source uploads).
  */
-import { MAX_ARGS } from "@tessera/schema";
+import { EventLayout, MAX_ARGS } from "@tessera/schema";
+import { CaptureRing, CHUNK_SAMPLES, pumpCapture } from "./captureRing";
 import { MessageRing } from "./messageRing";
 import { PROCESSOR_NAME, type ProcessorOptions, type WorkletReply, type WorkletRequest } from "./protocol";
 import { type EngineExports, instantiateEngine } from "./wasmEngine";
@@ -26,6 +27,11 @@ class TesseraProcessor extends AudioWorkletProcessor {
   private readonly handle: number;
   private readonly commands: MessageRing;
   private readonly events: MessageRing;
+  private readonly capture: CaptureRing;
+  private readonly pollCapture: () => boolean;
+  private readonly reportOverrun: (track: number) => void;
+  /** Preallocated arguments for overrun events (no allocation in `process()`). */
+  private readonly overrunArgs = new Float64Array(MAX_ARGS);
   private readonly pending = new Map<number, number>();
   private readonly sink: (op: number, args: Float64Array, base: number) => void;
   private memoryBuffer: ArrayBuffer | SharedArrayBuffer;
@@ -33,6 +39,10 @@ class TesseraProcessor extends AudioWorkletProcessor {
   private eventArgs!: Float64Array;
   private outL!: Float32Array;
   private outR!: Float32Array;
+  private inL!: Float32Array;
+  private inR!: Float32Array;
+  private captureInfo!: Float64Array;
+  private captureData!: Float32Array;
   private viewFrames = QUANTUM;
 
   constructor(options: AudioWorkletNodeOptions) {
@@ -42,6 +52,13 @@ class TesseraProcessor extends AudioWorkletProcessor {
     this.handle = this.engine.tessera_create(sampleRate);
     this.commands = new MessageRing(opts.commands, opts.ringCapacity);
     this.events = new MessageRing(opts.events, opts.ringCapacity);
+    this.capture = new CaptureRing(opts.capture, opts.captureCapacity);
+    this.pollCapture = () => this.engine.tessera_poll_capture(this.handle) !== 0;
+    this.reportOverrun = (track) => {
+      // Same event the native engine emits when its own capture queue overflows.
+      this.overrunArgs[0] = track;
+      this.events.push(EventLayout.CaptureOverrun.op, this.overrunArgs);
+    };
     this.memoryBuffer = this.engine.memory.buffer;
     this.refreshViews(QUANTUM);
     this.sink = (op, args, base) => {
@@ -53,7 +70,7 @@ class TesseraProcessor extends AudioWorkletProcessor {
     this.reply({ type: "ready" });
   }
 
-  process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
+  process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const output = outputs[0];
     const left = output?.[0];
     if (!output || !left || this.handle === 0) return true;
@@ -63,7 +80,12 @@ class TesseraProcessor extends AudioWorkletProcessor {
     }
 
     this.commands.drain(this.sink);
-    this.engine.tessera_process(this.handle, frames);
+    // Input arrives only while a microphone stream is connected; otherwise no channels.
+    const input = inputs[0];
+    const inChannels = Math.min(2, input?.length ?? 0);
+    if (inChannels > 0) this.inL.set(input![0]!); // Same length as the output (one render quantum).
+    if (inChannels > 1) this.inR.set(input![1]!);
+    this.engine.tessera_process(this.handle, frames, inChannels);
     left.set(this.outL);
     output[1]?.set(this.outR);
 
@@ -75,6 +97,8 @@ class TesseraProcessor extends AudioWorkletProcessor {
       // Dropping events when the main thread is behind is fine.
       this.events.push(op, this.eventArgs);
     }
+    // Captured input goes straight to the background worker, which writes the takes.
+    pumpCapture(this.pollCapture, this.captureInfo, this.captureData, this.capture, this.reportOverrun);
     return true;
   }
 
@@ -87,6 +111,10 @@ class TesseraProcessor extends AudioWorkletProcessor {
     this.eventArgs = new Float64Array(buffer, engine.tessera_event_args(handle), MAX_ARGS);
     this.outL = new Float32Array(buffer, engine.tessera_output(handle, 0), frames);
     this.outR = new Float32Array(buffer, engine.tessera_output(handle, 1), frames);
+    this.inL = new Float32Array(buffer, engine.tessera_input(handle, 0), frames);
+    this.inR = new Float32Array(buffer, engine.tessera_input(handle, 1), frames);
+    this.captureInfo = new Float64Array(buffer, engine.tessera_capture_info(handle), 4);
+    this.captureData = new Float32Array(buffer, engine.tessera_capture_data(handle), CHUNK_SAMPLES);
   }
 
   /** Runs between render quanta, so it may allocate. */

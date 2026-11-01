@@ -6,6 +6,7 @@
 mod decode;
 mod peaks;
 mod resample;
+pub mod wav;
 
 pub use decode::{Decoded, decode};
 pub use peaks::{PEAK_FRAMES, Peaks, compute_peaks};

@@ -12,6 +12,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+engine-core = { version = "0.1.0", path = "../engine-core" }
 media = { path = "../media" }
 project = { path = "../project" }
 

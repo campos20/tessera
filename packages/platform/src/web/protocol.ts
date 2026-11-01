@@ -6,6 +6,9 @@ export interface ProcessorOptions {
   commands: SharedArrayBuffer;
   events: SharedArrayBuffer;
   ringCapacity: number;
+  /** Captured input → background worker (see `CaptureRing`). */
+  capture: SharedArrayBuffer;
+  captureCapacity: number;
 }
 
 /** Frames per `source-chunk` message: small enough to copy within one render quantum. */

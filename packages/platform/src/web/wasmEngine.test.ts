@@ -33,7 +33,7 @@ class TestEngine {
   render(frames: number): [Float32Array, Float32Array] {
     const out: [Float32Array, Float32Array] = [new Float32Array(frames), new Float32Array(frames)];
     for (let i = 0; i < frames; i += QUANTUM) {
-      const n = this.e.tessera_process(this.h, Math.min(QUANTUM, frames - i));
+      const n = this.e.tessera_process(this.h, Math.min(QUANTUM, frames - i), 0);
       out[0].set(new Float32Array(this.e.memory.buffer, this.e.tessera_output(this.h, 0), n), i);
       out[1].set(new Float32Array(this.e.memory.buffer, this.e.tessera_output(this.h, 1), n), i);
     }
@@ -122,7 +122,7 @@ describe("engine.wasm", () => {
 
     const start = performance.now();
     for (let i = 0; i < (SR * seconds) / QUANTUM; i++) {
-      t.e.tessera_process(t.h, QUANTUM);
+      t.e.tessera_process(t.h, QUANTUM, 0);
       if (i % 64 === 0) t.events();
     }
     const elapsed = (performance.now() - start) / 1000;

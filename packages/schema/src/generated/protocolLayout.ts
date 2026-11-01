@@ -26,11 +26,19 @@ export const CommandLayout = {
   SetClip: { op: 13, fields: [["clip", "number"], ["track", "number"], ["source", "number"], ["start", "number"], ["offset", "number"], ["length", "number"], ["gain", "number"], ["fadeIn", "number"], ["fadeOut", "number"]] },
   RemoveClip: { op: 14, fields: [["clip", "number"]] },
   RemoveSource: { op: 15, fields: [["source", "number"]] },
+  SetTrackArm: { op: 16, fields: [["track", "number"], ["armed", "bool"]] },
+  SetTrackInput: { op: 17, fields: [["track", "number"], ["channel", "number"], ["stereo", "bool"]] },
+  SetTrackMonitor: { op: 18, fields: [["track", "number"], ["monitor", "bool"]] },
+  SetRecord: { op: 19, fields: [["enabled", "bool"]] },
+  SetPunch: { op: 20, fields: [["enabled", "bool"], ["start", "number"], ["end", "number"]] },
+  SetCountIn: { op: 21, fields: [["frames", "number"]] },
 } as const satisfies Record<string, MessageLayout>;
 
 export const EventLayout = {
-  Transport: { op: 0, fields: [["playing", "bool"], ["position", "number"]] },
+  Transport: { op: 0, fields: [["playing", "bool"], ["position", "number"], ["recording", "bool"], ["countingIn", "bool"]] },
   TrackMeter: { op: 1, fields: [["track", "number"], ["peakL", "number"], ["peakR", "number"], ["rmsL", "number"], ["rmsR", "number"]] },
   MasterMeter: { op: 2, fields: [["peakL", "number"], ["peakR", "number"], ["rmsL", "number"], ["rmsR", "number"]] },
+  InputMeter: { op: 3, fields: [["track", "number"], ["peakL", "number"], ["peakR", "number"]] },
+  CaptureOverrun: { op: 4, fields: [["track", "number"]] },
 } as const satisfies Record<string, MessageLayout>;
 

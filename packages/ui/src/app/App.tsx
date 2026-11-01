@@ -3,9 +3,17 @@ import { useEffect, useState } from "react";
 import { Arrange, HEADER_WIDTH } from "../arrange/Arrange";
 import { type View, zoomAround } from "../arrange/timeScale";
 import { deleteClips, duplicateClips, removeTrack, splitClips } from "../model/edits";
-import { SessionContext, useProject, useSession, useSessionUi, useTransport } from "../state/hooks";
+import {
+  SessionContext,
+  useProject,
+  useRecording,
+  useSession,
+  useSessionUi,
+  useTransport,
+} from "../state/hooks";
 import { Session } from "../state/session";
 import { Meter } from "../Meter";
+import { AudioSettings } from "./AudioSettings";
 import { StatusBar } from "./StatusBar";
 import { TransportBar } from "./TransportBar";
 import "../theme.css";
@@ -33,17 +41,20 @@ function Workspace() {
   const session = useSession();
   const [view, setView] = useState<View>({ framesPerPx: 1200, scrollFrames: 0 });
   const [snap, setSnap] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   useShortcuts(setView, () => setSnap((s) => !s));
 
   return (
     <div className="app">
       <TransportBar
+        onOpenSettings={() => setSettingsOpen(true)}
         snap={snap}
         onToggleSnap={() => setSnap((s) => !s)}
         onZoom={(f) => setView((v) => zoomAround(v, f, 0))}
       />
       <Arrange view={view} onView={setView} snap={snap} />
       <Footer onError={() => session.reportError(undefined)} />
+      {settingsOpen && <AudioSettings onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }
@@ -51,6 +62,7 @@ function Workspace() {
 function Footer({ onError }: { onError: () => void }) {
   const ui = useSessionUi((s) => s);
   const tracks = useProject((s) => s.project.tracks.length);
+  const xruns = useRecording((s) => s.xruns);
   const master = useTransport((s) => s.master);
   const platform = useSession().platform;
   const save = {
@@ -76,6 +88,11 @@ function Footer({ onError }: { onError: () => void }) {
           </button>
         ),
         <span key="spacer" className="spacer" />,
+        xruns > 0 && (
+          <span key="xruns" className="error" title="Audio dropouts since the device was opened">
+            {xruns} dropout{xruns === 1 ? "" : "s"}
+          </span>
+        ),
         `${tracks} track${tracks === 1 ? "" : "s"}`,
         ui.engineRate ? `${(ui.engineRate / 1000).toFixed(1)} kHz` : "Audio off",
         platform.edition === "web" ? "Web" : "Desktop",
@@ -100,8 +117,13 @@ function useShortcuts(setView: (update: (v: View) => View) => void, toggleSnap: 
       const key = e.key.toLowerCase();
 
       const handled = (() => {
-        if (key === " ") session.togglePlay();
-        else if (key === "home" || key === "enter") session.seek(0);
+        if (key === " ") {
+          if (session.recording.getState().active) void session.stopRecording();
+          else session.togglePlay();
+        } else if (!mod && key === "r") {
+          if (session.recording.getState().active) void session.stopRecording();
+          else void session.record();
+        } else if (key === "home" || key === "enter") session.seek(0);
         else if (key === "end") session.seek(session.end());
         else if (mod && key === "z" && !e.shiftKey) s.undo();
         else if ((mod && key === "z" && e.shiftKey) || (mod && key === "y")) s.redo();

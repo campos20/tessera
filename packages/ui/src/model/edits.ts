@@ -67,6 +67,8 @@ export function addTrack(p: Project, name?: string, index = p.tracks.length): nu
     pan: 0,
     mute: false,
     solo: false,
+    inputChannel: 0,
+    inputStereo: false,
     clips: [],
   });
   return id;

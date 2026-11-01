@@ -38,6 +38,7 @@ describe("EngineSync", () => {
       "SetTrackPan",
       "SetTrackMute",
       "SetTrackSolo",
+      "SetTrackInput",
     ]);
     sent.length = 0;
     sync.registerSource(ids.source, 42);

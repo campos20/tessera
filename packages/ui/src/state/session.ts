@@ -1,8 +1,15 @@
-import type { AudioPlatform, ProjectSummary } from "@tessera/platform";
-import type { Peaks, Project, SourceInfo } from "@tessera/schema";
+import type {
+  AudioPlatform,
+  AudioSettings,
+  EngineInfo,
+  ProjectSummary,
+  RecordedTake,
+} from "@tessera/platform";
+import type { Peaks, Project, SourceInfo, TakeProgress } from "@tessera/schema";
 import { createStore } from "zustand/vanilla";
 import type { MeterReading } from "../Meter";
-import { addClip, addSource, addTrack, newProject, projectEnd } from "../model/edits";
+import { addClip, addSource, addTrack, findTrack, newProject, projectEnd } from "../model/edits";
+import { framesPerBar } from "../arrange/timeScale";
 import { EngineSync } from "./engineSync";
 import { createProjectStore, type ProjectStore } from "./store";
 
@@ -14,6 +21,36 @@ export interface TransportState {
   reportedAt: number;
   master: MeterReading;
   tracks: ReadonlyMap<number, MeterReading>;
+  /** Input level per armed or monitored track. */
+  inputs: ReadonlyMap<number, MeterReading>;
+  /** Input is being captured right now. */
+  recording: boolean;
+  countingIn: boolean;
+}
+
+/** A take being recorded, in project frames. */
+export interface LiveTake {
+  start: number;
+  frames: number;
+  framesPerPeak: number;
+  /** `[min, max, ...]` so far. */
+  peaks: number[];
+}
+
+export interface RecordState {
+  armed: ReadonlySet<number>;
+  monitored: ReadonlySet<number>;
+  /** Between `record()` and the end of `stopRecording()`. */
+  active: boolean;
+  countInBars: number;
+  /** Record only inside the loop region. */
+  punch: boolean;
+  live: ReadonlyMap<number, LiveTake>;
+  settings: AudioSettings;
+  engine: EngineInfo | undefined;
+  /** Round-trip latency compensation in engine frames, and whether it was measured. */
+  latency: { frames: number; calibrated: boolean };
+  xruns: number;
 }
 
 export type SaveState = "saved" | "saving" | "unsaved" | "error";
@@ -29,6 +66,17 @@ export interface SessionUiState {
 }
 
 const LAST_PROJECT_KEY = "tessera.lastProject";
+const SETTINGS_KEY = "tessera.audioSettings";
+const LATENCY_KEY = "tessera.latency";
+/** Calibration: metronome tempo, recording length, and the engine id of the temporary track. */
+const CALIBRATION_BPM = 120;
+const CALIBRATION_SECONDS = 3;
+const CALIBRATION_TRACK = 0x7fff_fff0;
+const MIN_CONFIDENCE = 0.5;
+/** Takes shorter than this (a stray block) are discarded. */
+const MIN_TAKE_FRAMES = 1024;
+/** Time for the engine to process Stop before the capture queue is drained. */
+const STOP_SETTLE_MS = 120;
 const AUTOSAVE_DELAY_MS = 800;
 const DEFAULT_ENGINE_RATE = 48_000;
 /** How long engine position reports may lag a seek before they are trusted again. */
@@ -46,6 +94,21 @@ export class Session {
     reportedAt: 0,
     master: { peakL: 0, peakR: 0 },
     tracks: new Map(),
+    inputs: new Map(),
+    recording: false,
+    countingIn: false,
+  }));
+  readonly recording = createStore<RecordState>()(() => ({
+    armed: new Set(),
+    monitored: new Set(),
+    active: false,
+    countInBars: 1,
+    punch: false,
+    live: new Map(),
+    settings: loadJson<AudioSettings>(SETTINGS_KEY) ?? {},
+    engine: undefined,
+    latency: { frames: 0, calibrated: false },
+    xruns: 0,
   }));
   readonly ui = createStore<SessionUiState>()(() => ({
     engineRate: undefined,
@@ -58,6 +121,8 @@ export class Session {
   private readonly sync: EngineSync;
   /** Set by `seek`: engine reports from before the seek are ignored until they catch up. */
   private pendingSeek: { frame: number; until: number } | undefined;
+  /** Tracks that lost captured audio during the current recording. */
+  private readonly overrunTracks = new Set<number>();
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private saving: Promise<void> = Promise.resolve();
   /** Serializes project loads, imports and saves. */
@@ -73,6 +138,8 @@ export class Session {
       if (state.revision !== prev.revision && state.project.id === prev.project.id) this.scheduleSave();
     });
     platform.onEvent((event) => this.onEngineEvent(event));
+    platform.onRecordingProgress((p) => this.onTakeProgress(p));
+    platform.onXruns((xruns) => this.recording.setState({ xruns }));
   }
 
   get project(): Project {
@@ -84,6 +151,16 @@ export class Session {
   /** Opens the last project (or a new one) and lists saved projects. Runs once. */
   init(): Promise<void> {
     this.initializing ??= this.run("Opening project…", async () => {
+      // Desktop: reopen the saved devices (no user gesture or permission prompt needed). The web
+      // opens the microphone only when a track is armed.
+      if (
+        this.platform.capabilities.settings.host &&
+        Object.keys(this.recording.getState().settings).length
+      ) {
+        await this.applyAudioSettings(this.recording.getState().settings).catch((e: unknown) =>
+          this.reportError(`Audio settings could not be applied: ${message(e)}`),
+        );
+      }
       await this.refreshProjects();
       const last = safeLocalStorage()?.getItem(LAST_PROJECT_KEY);
       const existing =
@@ -106,7 +183,298 @@ export class Session {
   async startEngine(): Promise<void> {
     const info = await this.platform.start();
     if (this.ui.getState().engineRate !== info.sampleRate) this.ui.setState({ engineRate: info.sampleRate });
+    this.setEngineInfo(info);
     this.adoptEngineRate(info.sampleRate);
+  }
+
+  private setEngineInfo(info: EngineInfo) {
+    const key = this.latencyKey(info);
+    const calibrated = loadJson<Record<string, number>>(LATENCY_KEY)?.[key];
+    this.recording.setState({
+      engine: info,
+      latency:
+        calibrated !== undefined
+          ? { frames: calibrated, calibrated: true }
+          : { frames: info.latencyEstimate, calibrated: false },
+    });
+  }
+
+  /** Calibrations are stored per device combination. */
+  private latencyKey(info: EngineInfo): string {
+    const s = this.recording.getState().settings;
+    return [
+      this.platform.edition,
+      s.host,
+      s.inputDevice,
+      s.outputDevice,
+      info.sampleRate,
+      info.bufferSize,
+    ].join("|");
+  }
+
+  // Devices --------------------------------------------------------------------------------
+
+  /**
+   * Applies and remembers device settings. When the platform restarts its engine (desktop),
+   * the project and its audio are sent to the new engine.
+   */
+  async applyAudioSettings(settings: AudioSettings): Promise<void> {
+    if (this.recording.getState().active) throw new Error("Stop recording before changing devices.");
+    const position = this.transport.getState().position;
+    this.stop();
+    const { info, restarted } = await this.platform.configureAudio(settings);
+    this.recording.setState({ settings });
+    safeLocalStorage()?.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    this.ui.setState({ engineRate: info.sampleRate });
+    this.setEngineInfo(info);
+    if (restarted) await this.reloadEngine(info.sampleRate, position);
+    else this.adoptEngineRate(info.sampleRate);
+  }
+
+  /** Opens an input (the saved one, or the default) if none is open yet. */
+  private async ensureInput(): Promise<void> {
+    if ((this.recording.getState().engine?.inputChannels ?? 0) > 0) return;
+    const settings = this.recording.getState().settings;
+    await this.applyAudioSettings({ ...settings, inputDevice: settings.inputDevice ?? "default" });
+    if (!this.recording.getState().engine?.inputChannels) throw new Error("No audio input is available.");
+  }
+
+  /** A fresh engine (after a device change): resend everything and reload the audio. */
+  private async reloadEngine(rate: number, position: number) {
+    this.sync.reset();
+    this.sync.setEngineRate(rate);
+    this.sync.sync(this.project);
+    const { armed, monitored } = this.recording.getState();
+    for (const track of armed) this.platform.send({ type: "SetTrackArm", track, armed: true });
+    for (const track of monitored) this.platform.send({ type: "SetTrackMonitor", track, monitor: true });
+    await this.loadAudio(this.project);
+    this.seek(position);
+  }
+
+  // Recording ------------------------------------------------------------------------------
+
+  async toggleArm(trackId: number) {
+    const armed = new Set(this.recording.getState().armed);
+    const on = !armed.has(trackId);
+    if (on) {
+      try {
+        await this.ensureInput();
+      } catch (e) {
+        this.reportError(`Can't arm the track: ${message(e)}`);
+        return;
+      }
+      armed.add(trackId);
+    } else armed.delete(trackId);
+    this.recording.setState({ armed });
+    this.platform.send({ type: "SetTrackArm", track: trackId, armed: on });
+  }
+
+  async toggleMonitor(trackId: number) {
+    const monitored = new Set(this.recording.getState().monitored);
+    const on = !monitored.has(trackId);
+    if (on) {
+      try {
+        await this.ensureInput();
+      } catch (e) {
+        this.reportError(`Can't monitor the track: ${message(e)}`);
+        return;
+      }
+      monitored.add(trackId);
+    } else monitored.delete(trackId);
+    this.recording.setState({ monitored });
+    this.platform.send({ type: "SetTrackMonitor", track: trackId, monitor: on });
+  }
+
+  setTrackInput(trackId: number, channel: number, stereo: boolean) {
+    this.store.getState().edit("Change track input", (p) => {
+      const track = findTrack(p, trackId);
+      if (track) Object.assign(track, { inputChannel: channel, inputStereo: stereo });
+    });
+  }
+
+  setCountIn(bars: number) {
+    this.recording.setState({ countInBars: bars });
+  }
+
+  setPunch(punch: boolean) {
+    this.recording.setState({ punch });
+  }
+
+  /** Starts recording the armed tracks from the playhead (after the count-in). */
+  record(): Promise<void> {
+    return this.run("Starting recording…", async () => {
+      if (this.recording.getState().active) return;
+      if (this.recording.getState().armed.size === 0) throw new Error("Arm a track (●) before recording.");
+      await this.startEngine();
+      await this.ensureInput();
+      const project = this.project;
+      await this.platform.beginRecording(project.id);
+      const { countInBars, punch } = this.recording.getState();
+      const bar = framesPerBar({
+        sampleRate: project.sampleRate,
+        tempo: project.tempo,
+        timeSignature: project.timeSignature,
+      });
+      this.stop();
+      this.platform.send({ type: "SetCountIn", frames: this.sync.toEngine(countInBars * bar, project) });
+      this.platform.send({
+        type: "SetPunch",
+        enabled: punch,
+        start: this.sync.toEngine(project.loop.start, project),
+        end: this.sync.toEngine(project.loop.end, project),
+      });
+      this.platform.send({ type: "SetRecord", enabled: true });
+      this.platform.send({ type: "Play" });
+      this.overrunTracks.clear();
+      this.recording.setState({ active: true, live: new Map() });
+      this.transport.setState({ playing: true, reportedAt: performance.now() });
+    });
+  }
+
+  /** Stops the transport and turns the takes into clips (one undo step). */
+  stopRecording(): Promise<void> {
+    return this.run("Saving takes…", async () => {
+      if (!this.recording.getState().active) return;
+      this.stop();
+      this.platform.send({ type: "SetRecord", enabled: false });
+      await new Promise((r) => setTimeout(r, STOP_SETTLE_MS));
+      let takes: RecordedTake[];
+      try {
+        takes = (await this.platform.endRecording()).filter((t) => t.frames >= MIN_TAKE_FRAMES);
+      } finally {
+        // Leave the recording state even if finishing failed, so Record works again.
+        this.recording.setState({ active: false, live: new Map() });
+      }
+      if (takes.length) await this.placeTakes(takes);
+    });
+  }
+
+  /** Stops whatever is running: recording if active, otherwise playback. */
+  stopAll() {
+    if (this.recording.getState().active) void this.stopRecording();
+    else this.stop();
+  }
+
+  private async placeTakes(takes: RecordedTake[]) {
+    const project = this.project;
+    const engineRate = this.sync.rate;
+    const latency = this.recording.getState().latency.frames;
+    const toProject = (f: number) => Math.round((f * project.sampleRate) / engineRate);
+    const placed: { take: RecordedTake; sourceId: number }[] = [];
+    this.store.getState().edit(takes.length > 1 ? "Record takes" : "Record take", (p) => {
+      for (const take of takes) {
+        const track = findTrack(p, take.track);
+        if (!track) continue;
+        // Captured audio is stamped with when it arrived; it was played `latency` earlier.
+        const start = toProject(take.start - latency);
+        const offset = Math.max(0, -start);
+        const frames = toProject(take.frames);
+        if (offset >= frames) continue;
+        const takeNumber = track.clips.length + 1;
+        const sourceId = addSource(p, {
+          name: `${track.name} take ${takeNumber}.wav`,
+          file: take.path,
+          frames,
+          channels: take.channels,
+          originalSampleRate: engineRate,
+        });
+        const clipId = addClip(p, track.id, sourceId, Math.max(0, start));
+        const clip = clipId !== undefined ? track.clips.find((c) => c.id === clipId) : undefined;
+        if (clip) {
+          clip.offset = offset;
+          clip.length = frames - offset;
+          // Make lost audio visible on the clip itself, not just in a transient message.
+          const lost = this.overrunTracks.has(track.id) ? " (audio lost)" : "";
+          clip.name = `${track.name} take ${takeNumber}${lost}`;
+        }
+        placed.push({ take, sourceId });
+      }
+    });
+    for (const { take, sourceId } of placed) {
+      const file = await this.platform.storage.readFile(project.id, take.path);
+      this.registerAudio(sourceId, await this.platform.importAudio(file));
+    }
+  }
+
+  private onTakeProgress(p: TakeProgress) {
+    const project = this.project;
+    const scale = project.sampleRate / this.sync.rate;
+    const live = new Map(this.recording.getState().live);
+    const take = live.get(p.track);
+    live.set(p.track, {
+      start: Math.round((p.start - this.recording.getState().latency.frames) * scale),
+      frames: Math.round(p.frames * scale),
+      framesPerPeak: 256 * scale,
+      peaks:
+        take && take.start === Math.round((p.start - this.recording.getState().latency.frames) * scale)
+          ? [...take.peaks, ...p.peaks]
+          : p.peaks,
+    });
+    this.recording.setState({ live });
+  }
+
+  /**
+   * Measures round-trip latency with a loopback cable from an output to `inputChannel`: plays
+   * the metronome for a few seconds while recording, then finds the clicks in the recording.
+   */
+  calibrate(inputChannel: number): Promise<number | undefined> {
+    let result: number | undefined;
+    return this.run("Calibrating latency…", async () => {
+      await this.startEngine();
+      await this.ensureInput();
+      const project = this.project;
+      const position = this.transport.getState().position;
+      const send = (c: Parameters<AudioPlatform["send"]>[0]) => this.platform.send(c);
+      const track = CALIBRATION_TRACK;
+      const armed = this.recording.getState().armed;
+      this.stop();
+      await this.platform.beginRecording(project.id);
+      let takes: RecordedTake[];
+      try {
+        send({ type: "AddTrack", track });
+        send({ type: "SetTrackInput", track, channel: inputChannel, stereo: false });
+        send({ type: "SetTrackArm", track, armed: true });
+        for (const t of armed) send({ type: "SetTrackArm", track: t, armed: false });
+        send({ type: "SetTempo", bpm: CALIBRATION_BPM });
+        send({ type: "SetMetronome", enabled: true, gain: 0.8, beatsPerBar: 4 });
+        send({ type: "SetLoop", enabled: false, start: 0, end: 0 });
+        send({ type: "SetPunch", enabled: false, start: 0, end: 0 });
+        send({ type: "SetCountIn", frames: 0 });
+        send({ type: "Seek", frame: 0 });
+        send({ type: "SetRecord", enabled: true });
+        send({ type: "Play" });
+        await new Promise((r) => setTimeout(r, CALIBRATION_SECONDS * 1000));
+      } finally {
+        // Always restore the engine, even if something failed mid-way.
+        send({ type: "Stop" });
+        send({ type: "SetRecord", enabled: false });
+        await new Promise((r) => setTimeout(r, STOP_SETTLE_MS));
+        takes = await this.platform.endRecording().catch(() => []);
+        send({ type: "RemoveTrack", track });
+        for (const t of armed) send({ type: "SetTrackArm", track: t, armed: true });
+        this.sync.resend(this.project); // Tempo, metronome and loop as the project has them.
+        this.seek(position);
+      }
+
+      const take = takes.find((t) => t.track === track);
+      try {
+        const m = take && (await this.platform.measureLatency(project.id, take.path, CALIBRATION_BPM));
+        if (!m || m.confidence < MIN_CONFIDENCE) {
+          throw new Error(
+            "No clicks were detected. Check the loopback cable and the input channel, then try again.",
+          );
+        }
+        const info = this.recording.getState().engine!;
+        const stored = loadJson<Record<string, number>>(LATENCY_KEY) ?? {};
+        stored[this.latencyKey(info)] = m.frames;
+        safeLocalStorage()?.setItem(LATENCY_KEY, JSON.stringify(stored));
+        this.recording.setState({ latency: { frames: m.frames, calibrated: true } });
+        result = m.frames;
+      } finally {
+        // Calibration recordings aren't part of the project.
+        for (const t of takes) await this.platform.storage.deleteFile(project.id, t.path).catch(() => {});
+      }
+    }).then(() => result);
   }
 
   /**
@@ -258,11 +626,21 @@ export class Session {
     clearTimeout(this.saveTimer);
     this.stop();
     this.sync.reset();
+    // Arming and monitoring belong to the session, not the project.
+    for (const track of this.recording.getState().armed)
+      this.platform.send({ type: "SetTrackArm", track, armed: false });
+    for (const track of this.recording.getState().monitored)
+      this.platform.send({ type: "SetTrackMonitor", track, monitor: false });
+    this.recording.setState({ armed: new Set(), monitored: new Set() });
     this.store.getState().load(project);
     this.seek(0);
     safeLocalStorage()?.setItem(LAST_PROJECT_KEY, project.id);
     this.ui.setState({ saveState: "saved" });
+    await this.loadAudio(project);
+  }
 
+  /** Decodes every source the project's clips use into the engine. */
+  private async loadAudio(project: Project) {
     const sources = project.sources.filter((s) =>
       project.tracks.some((t) => t.clips.some((c) => c.sourceId === s.id)),
     );
@@ -299,7 +677,25 @@ export class Session {
           if (!caughtUp && performance.now() < seek.until) break;
           this.pendingSeek = undefined;
         }
-        this.transport.setState({ playing: event.playing, position, reportedAt: performance.now() });
+        this.transport.setState({
+          playing: event.playing,
+          position,
+          reportedAt: performance.now(),
+          recording: event.recording,
+          countingIn: event.countingIn,
+        });
+        break;
+      }
+      case "InputMeter":
+        this.transport.setState((s) => ({ inputs: new Map(s.inputs).set(event.track, event) }));
+        break;
+      case "CaptureOverrun": {
+        // Remember the track so its take is marked, and say which track lost audio.
+        if (this.recording.getState().active) this.overrunTracks.add(event.track);
+        const name = this.project.tracks.find((t) => t.id === event.track)?.name ?? "a track";
+        this.reportError(
+          `Recording fell behind and audio was lost on "${name}"; its take has a gap. Try a larger buffer or fewer armed tracks.`,
+        );
         break;
       }
       case "MasterMeter":
@@ -392,6 +788,15 @@ function baseName(name: string): string {
 
 function safeFileName(name: string): string {
   return name.replace(/[^\w.-]+/g, "_").slice(-80) || "audio";
+}
+
+function loadJson<T>(key: string): T | undefined {
+  try {
+    const text = safeLocalStorage()?.getItem(key);
+    return text ? (JSON.parse(text) as T) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function safeLocalStorage(): Storage | undefined {

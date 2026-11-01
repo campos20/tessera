@@ -1,4 +1,9 @@
+import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
+
+// Chromium's fake microphone plays this file in a loop (a 330 Hz tone), so recording can be
+// tested end to end without hardware.
+const FAKE_MIC = fileURLToPath(new URL("./e2e/fixtures/mic.wav", import.meta.url));
 
 // E2E_DEV=1 runs against the Vite dev server instead of the production build.
 // E2E_PAGES=1 mimics GitHub Pages: served under /tessera/ without COOP/COEP headers, so
@@ -21,7 +26,15 @@ export default defineConfig({
       name: "chromium",
       use: {
         ...devices["Desktop Chrome"],
-        launchOptions: { args: ["--autoplay-policy=no-user-gesture-required"] },
+        permissions: ["microphone"],
+        launchOptions: {
+          args: [
+            "--autoplay-policy=no-user-gesture-required",
+            "--use-fake-device-for-media-stream",
+            "--use-fake-ui-for-media-stream",
+            `--use-file-for-fake-audio-capture=${FAKE_MIC}`,
+          ],
+        },
       },
     },
   ],
