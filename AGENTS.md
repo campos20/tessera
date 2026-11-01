@@ -129,6 +129,19 @@ packages/schema        generated TS types
     session state, the track's input selection is saved (schema v2).
 - [ ] **M4** Tune: analysis, note editing, pitch correction, timing quantize, incremental re-render.
       First public release ("record + Tune" on the web).
+  - Accept: `tune` matches goldens generated from the reference prototype (pitch within 1e-4
+    semitones, notes within 1 cent, renders within −40 dB); unedited notes null against the
+    source exactly; auto-correct lands within 5 cents; a 3-minute vocal analyzes in < 1 s native
+    and < 3 s on the web, and a one-note edit re-plans in < 150 ms; a Playwright test opens a
+    clip in Tune, edits, plays, undoes and reloads.
+  - Decisions: a tuned clip plays as the original source plus rendered regions (edited notes
+    ± 30 ms, 10 ms crossfades), so unedited audio is bit-exact and edits re-render only their
+    region (regions are cached by a content key); EngineSync expands a tuned clip into one engine
+    clip per segment; only edits are saved (`clip.tune`, schema v3) and the analysis is
+    recomputed when a clip is opened; analysis and rendering run in the web worker
+    (`worker-wasm`) or the desktop backend behind `AudioPlatform.tune`; the editor is a Canvas 2D
+    bottom pane in `packages/ui/src/tune`, editing through the undoable store; the renderer sits
+    behind `tune::PitchRenderer` so better algorithms can replace PSOLA later.
 - [ ] **M5** Mixer, built-in effects, automation.
 - [ ] **M6** MIDI: piano roll, synth/sampler, MIDI I/O, export Tune notes as MIDI.
 - [ ] **M7** Desktop plugin hosting (VST3 + CLAP), out-of-process scanner.

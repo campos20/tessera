@@ -6,8 +6,10 @@ import type {
   AudioInfo,
   Command,
   Event,
+  Note,
   SourceInfo,
   TakeProgress,
+  TuneAnalysis,
 } from "@tessera/schema";
 import type { RecordedTake as NativeTake } from "@tessera/schema";
 import type {
@@ -20,6 +22,8 @@ import type {
   PlatformCapabilities,
   ProjectStorage,
   RecordedTake,
+  TunePlan,
+  TuneService,
 } from "../index";
 import { TauriStorage } from "./storage";
 
@@ -38,6 +42,15 @@ export class TauriPlatform implements AudioPlatform {
     settings: { host: true, outputDevice: true, inputDevice: true, sampleRate: true, bufferSize: true },
   };
   readonly storage: ProjectStorage = new TauriStorage();
+  /** Sessions live in the backend, which hands rendered regions straight to the engine. */
+  readonly tune: TuneService = {
+    open: async (sessionId, projectId, path) => {
+      await this.start();
+      return invoke<TuneAnalysis>("tune_open", { sessionId, projectId, path });
+    },
+    plan: (sessionId, notes: Note[]) => invoke<TunePlan>("tune_plan", { sessionId, notes }),
+    close: (sessionId) => invoke("tune_close", { sessionId }),
+  };
 
   private starting: Promise<EngineInfo> | undefined;
   private started = false;

@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 import { useStore } from "zustand";
-import type { RecordState, Session, SessionUiState, TransportState } from "./session";
+import type { RecordState, Session, SessionUiState, TransportState, TuneState } from "./session";
 import type { ProjectActions, ProjectState } from "./store";
 
 export const SessionContext = createContext<Session | null>(null);
@@ -26,4 +26,8 @@ export function useSessionUi<T>(selector: (s: SessionUiState) => T): T {
 
 export function useRecording<T>(selector: (s: RecordState) => T): T {
   return useStore(useSession().recording, selector);
+}
+
+export function useTune<T>(selector: (s: TuneState) => T): T {
+  return useStore(useSession().tune, selector);
 }

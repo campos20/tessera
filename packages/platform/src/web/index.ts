@@ -2,8 +2,11 @@ import {
   type AudioDeviceList,
   type Command,
   MAX_ARGS,
+  type Note,
+  type PlannedSegment,
   type SourceInfo,
   type TakeProgress,
+  type TuneAnalysis,
 } from "@tessera/schema";
 import type {
   AudioPlatform,
@@ -15,6 +18,8 @@ import type {
   PlatformCapabilities,
   ProjectStorage,
   RecordedTake,
+  TunePlan,
+  TuneService,
 } from "../index";
 import { CaptureRing } from "./captureRing";
 import { decodeEvent, encodeCommand } from "./codec";
@@ -73,6 +78,51 @@ export class WebPlatform implements AudioPlatform {
   private input: { stream: MediaStream; source: MediaStreamAudioSourceNode } | undefined;
   private readonly progressListeners = new Set<(p: TakeProgress) => void>();
   readonly storage: ProjectStorage = new OpfsStorage(this.worker);
+  /** Engine sources of rendered Tune regions, per session, by region key. */
+  private readonly tuneSources = new Map<string, Map<string, number>>();
+  readonly tune: TuneService = {
+    open: async (sessionId, projectId, path) => {
+      await this.init();
+      const json = await this.worker.call({
+        kind: "tuneOpen",
+        sessionId,
+        projectId,
+        path,
+        targetRate: this.ctx!.sampleRate,
+      });
+      this.tuneSources.set(sessionId, this.tuneSources.get(sessionId) ?? new Map());
+      return JSON.parse(json) as TuneAnalysis;
+    },
+    plan: async (sessionId, notes: Note[]): Promise<TunePlan> => {
+      const sources = this.tuneSources.get(sessionId);
+      if (!sources) throw new Error("tune session is not open");
+      const { plan, regions } = await this.worker.call({
+        kind: "tunePlan",
+        sessionId,
+        notesJson: JSON.stringify(notes),
+        knownJson: JSON.stringify([...sources.keys()]),
+      });
+      const parsed = JSON.parse(plan) as {
+        segments: PlannedSegment[];
+        outputFrames: number;
+        regions: { key: string }[];
+      };
+      // Upload only the regions this plan rendered; earlier ones are already in the engine.
+      for (const [i, region] of parsed.regions.entries()) {
+        const audio = regions[i]!;
+        sources.set(region.key, await this.uploadSource(audio, audio[0]?.length ?? 0));
+      }
+      const used: Record<string, number> = {};
+      for (const seg of parsed.segments) if (seg.kind === "rendered") used[seg.key] = sources.get(seg.key)!;
+      return { segments: parsed.segments, outputFrames: parsed.outputFrames, sources: used };
+    },
+    close: async (sessionId) => {
+      await this.worker.call({ kind: "tuneClose", sessionId });
+      for (const id of this.tuneSources.get(sessionId)?.values() ?? [])
+        this.send({ type: "RemoveSource", source: id });
+      this.tuneSources.delete(sessionId);
+    },
+  };
 
   async start(): Promise<EngineInfo> {
     await this.init();
@@ -184,15 +234,7 @@ export class WebPlatform implements AudioPlatform {
     );
 
     const { channels, frames } = decoded;
-    await this.request({ type: "source-begin", id, channels: channels.length, frames });
-    for (let offset = 0; offset < frames; offset += SOURCE_CHUNK_FRAMES) {
-      const data = channels.map((c) => c.slice(offset, offset + SOURCE_CHUNK_FRAMES));
-      await this.request(
-        { type: "source-chunk", id, offset, data },
-        data.map((d) => d.buffer),
-      );
-    }
-    await this.request({ type: "source-end", id });
+    await this.uploadSourceAs(id, channels, frames);
 
     return {
       id,
@@ -203,6 +245,27 @@ export class WebPlatform implements AudioPlatform {
       originalSampleRate: decoded.originalSampleRate,
       peaks: { framesPerPeak: decoded.framesPerPeak, data: decoded.peaks.map((p) => Array.from(p)) },
     };
+  }
+
+  /** Hands planar audio (at the engine rate) to the engine as a new source; returns its id. */
+  private async uploadSource(channels: Float32Array[], frames: number): Promise<number> {
+    await this.init();
+    const id = this.nextSourceId++;
+    await this.uploadSourceAs(id, channels, frames);
+    return id;
+  }
+
+  /** Copies audio into the worklet in acknowledged chunks (never inside `process()`). */
+  private async uploadSourceAs(id: number, channels: Float32Array[], frames: number): Promise<void> {
+    await this.request({ type: "source-begin", id, channels: channels.length, frames });
+    for (let offset = 0; offset < frames; offset += SOURCE_CHUNK_FRAMES) {
+      const data = channels.map((c) => c.slice(offset, offset + SOURCE_CHUNK_FRAMES));
+      await this.request(
+        { type: "source-chunk", id, offset, data },
+        data.map((d) => d.buffer),
+      );
+    }
+    await this.request({ type: "source-end", id });
   }
 
   async listDevices(): Promise<AudioDeviceList> {

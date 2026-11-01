@@ -351,6 +351,10 @@ export function Arrange({ view, onView, snap }: ArrangeProps) {
                 onPointerDown={(e) => onLanePointerDown(e, track.id)}
                 onPointerMove={(e) => onLanePointerMove(e, track.id)}
                 onPointerUp={onLanePointerUp}
+                onDoubleClick={(e) => {
+                  const hit = hitTestClip(track, view, e.nativeEvent.offsetX, e.nativeEvent.offsetY);
+                  if (hit?.part === "body") void session.openTune(hit.clip.id);
+                }}
               />
             </div>
           ))}

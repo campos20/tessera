@@ -1,0 +1,153 @@
+.tune-pane {
+  position: relative;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  border-top: 1px solid var(--border-strong);
+  background: var(--panel);
+  min-height: 180px;
+}
+
+.tune-resizer {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 7px;
+  cursor: ns-resize;
+  z-index: 3;
+}
+
+.tune-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.tune-area {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tune-canvas {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+}
+
+.tune-panel {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  box-sizing: border-box;
+  padding: 8px 10px 10px;
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.tune-panel header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tune-panel header strong {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tune-panel h4 {
+  margin: 8px 0 0;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tune-panel button,
+.tune-panel select,
+.tune-panel input[type="number"] {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-raised);
+  color: var(--text);
+  font: inherit;
+}
+
+.tune-panel button:hover:not(:disabled) {
+  background: var(--panel-hover);
+}
+
+.tune-panel button:disabled {
+  opacity: 0.45;
+}
+
+.tune-panel button.on {
+  border-color: var(--loop-strong);
+  color: #8fb4ff;
+}
+
+.tune-panel button.primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tune-panel .tune-close {
+  padding: 1px 6px;
+  border: 0;
+  background: none;
+  color: var(--text-dim);
+}
+
+.tune-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.tune-check,
+.tune-inline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-dim);
+}
+
+.tune-inline input {
+  width: 46px;
+}
+
+.tune-slider {
+  display: grid;
+  grid-template-columns: 74px 1fr 34px;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+}
+
+.tune-slider input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.tune-slider output {
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.tune-hint {
+  margin: 8px 0 0;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.4;
+}

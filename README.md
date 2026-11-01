@@ -10,8 +10,8 @@ pitch-alignment software. It is built from one codebase in two editions:
 All DSP lives in Rust crates that compile to both WebAssembly and native code. See
 [AGENTS.md](AGENTS.md) for the architecture, conventions and roadmap.
 
-**Status:** M3 in progress: recording (arm, input selection, monitoring, count-in, punch),
-device settings and latency calibration, on top of the M2 arrange view and projects.
+**Status:** M4 in progress: Tune (note-level pitch and timing editing), on top of recording
+(M3, pending hardware checks), the arrange view and projects.
 
 ## Using it
 
@@ -23,6 +23,14 @@ device settings and latency calibration, on top of the M2 arrange view and proje
 - **Record:** arm a track (●), choose its input in the track's ⋯ menu, then press Record (R).
   The ▾ next to Record sets the count-in and punch (record only inside the loop region). Takes
   become clips, compensated for the round-trip latency.
+- **Tune:** double-click an audio clip to open it in the Tune editor (bottom pane). Tessera
+  detects its notes, key and tempo. Drag notes up or down to change pitch (snaps to semitones;
+  hold Alt for free pitch), sideways to move them, and drag their edges to stretch. Double-click
+  splits a note. Box-select or Shift-click to select several. The side panel holds the scale,
+  auto-correct (pitch center, drift, vibrato), timing quantize to the project tempo, per-selection
+  drift and vibrato, reset, and an A/B switch to compare with the original. Arrow keys move the
+  selection by a semitone (Shift: an octave). Edits are undoable and saved with the project; only
+  the edited regions are re-rendered.
 - **Devices and latency:** ⚙ opens the audio settings. Calibrate with a cable from an output to
   an input: Tessera plays its metronome, records it back and measures the delay. On desktop,
   `cargo run --release -p engine-native --example soak -- --buffer 128 --minutes 10 --input default`
@@ -86,7 +94,7 @@ crates/engine-wasm     raw C-ABI WASM build of engine-core, run inside the Audio
 crates/engine-native   cpal input/output, device settings, take recorder, file import (desktop)
 crates/media           decoding (WAV, FLAC, MP3, OGG Vorbis, AAC/M4A), resampling, waveform peaks
 crates/worker-wasm     raw C-ABI WASM for the web worker: decoding, project loading, archives
-crates/tune            Tune pitch editor DSP (M4)
+crates/tune            Tune DSP: pitch analysis, notes, key/tempo, PSOLA rendering, render plans
 crates/project         project model, schema versions and migrations, .tessera archives
 crates/plugin-host     VST3/CLAP hosting (M7)
 apps/web               Vite app using WebPlatform

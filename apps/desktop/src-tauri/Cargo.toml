@@ -23,6 +23,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tune = { version = "0.1.0", path = "../../../crates/tune" }
 
 [lints]
 workspace = true

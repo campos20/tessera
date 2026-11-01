@@ -2705,6 +2705,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ts-rs",
+ "tune",
 ]
 
 [[package]]
@@ -3952,6 +3953,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
+ "tune",
 ]
 
 [[package]]
@@ -4309,6 +4311,12 @@ dependencies = [
 [[package]]
 name = "tune"
 version = "0.1.0"
+dependencies = [
+ "hound",
+ "serde",
+ "serde_json",
+ "ts-rs",
+]
 
 [[package]]
 name = "typeid"
@@ -5206,6 +5214,8 @@ dependencies = [
  "engine-core",
  "media",
  "project",
+ "serde_json",
+ "tune",
 ]
 
 [[package]]

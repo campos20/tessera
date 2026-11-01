@@ -15,6 +15,8 @@ import {
   loadProjectJson,
   measureLatency,
   packArchive,
+  tuneOpen,
+  tunePlan,
   unpackArchive,
   type WorkerExports,
 } from "./workerWasm";
@@ -27,7 +29,10 @@ export type WorkerRequest =
   | { kind: "attachCapture"; id: number; ring: SharedArrayBuffer; capacity: number }
   | { kind: "recordStart"; id: number; projectId: string; prefix: string; sampleRate: number }
   | { kind: "recordStop"; id: number }
-  | { kind: "measureLatency"; id: number; projectId: string; path: string; bpm: number };
+  | { kind: "measureLatency"; id: number; projectId: string; path: string; bpm: number }
+  | { kind: "tuneOpen"; id: number; sessionId: string; projectId: string; path: string; targetRate: number }
+  | { kind: "tunePlan"; id: number; sessionId: string; notesJson: string; knownJson: string }
+  | { kind: "tuneClose"; id: number; sessionId: string };
 
 export interface WorkerResults {
   decode: DecodedAudio;
@@ -38,6 +43,9 @@ export interface WorkerResults {
   recordStart: undefined;
   recordStop: FinishedTake[];
   measureLatency: { frames: number; confidence: number } | null;
+  tuneOpen: string;
+  tunePlan: { plan: string; regions: Float32Array[][] };
+  tuneClose: undefined;
 }
 
 /** Replies to requests carry their `id`; unsolicited events don't. */
@@ -54,6 +62,8 @@ let wasm: Promise<WorkerExports> | undefined;
 let capture: CaptureRing | undefined;
 let recording: { recorder: CaptureRecorder; timer: number } | undefined;
 let idleTimer = 0;
+/** Open tuning sessions: session id → handle in worker.wasm. */
+const tuneSessions = new Map<string, number>();
 
 const loadWasm = () =>
   (wasm ??= WebAssembly.instantiateStreaming(fetch(workerWasmUrl)).then(
@@ -172,6 +182,39 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       case "recordStop":
         result = await stopRecording();
         break;
+      case "tuneOpen": {
+        const m = await loadWasm();
+        const [folder, name] = request.path.split("/") as [string, string];
+        const file = await (
+          await (await (await projectDir(request.projectId)).getDirectoryHandle(folder)).getFileHandle(name)
+        ).getFile();
+        const old = tuneSessions.get(request.sessionId);
+        if (old) m.tune_close(old);
+        const ext = name.includes(".") ? name.split(".").pop()!.toLowerCase() : undefined;
+        const { session, analysis } = tuneOpen(
+          m,
+          new Uint8Array(await file.arrayBuffer()),
+          ext,
+          request.targetRate,
+        );
+        tuneSessions.set(request.sessionId, session);
+        result = analysis;
+        break;
+      }
+      case "tunePlan": {
+        const session = tuneSessions.get(request.sessionId);
+        if (!session) throw new Error("tune session is not open");
+        const planned = tunePlan(await loadWasm(), session, request.notesJson, request.knownJson);
+        result = planned;
+        transfer = planned.regions.flat().map((a) => a.buffer);
+        break;
+      }
+      case "tuneClose": {
+        const session = tuneSessions.get(request.sessionId);
+        if (session) (await loadWasm()).tune_close(session);
+        tuneSessions.delete(request.sessionId);
+        break;
+      }
       case "measureLatency": {
         const { samples, sampleRate } = await readTake(request.projectId, request.path);
         result = measureLatency(await loadWasm(), samples, sampleRate, request.bpm);

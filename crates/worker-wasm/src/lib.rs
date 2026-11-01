@@ -357,6 +357,128 @@ pub unsafe extern "C" fn calibration_measure(
     }
 }
 
+/// A tuning session plus the audio of the regions its last plan rendered.
+pub struct TuneHandle {
+    session: tune::TuneSession,
+    regions: Vec<(String, Vec<Vec<f32>>)>,
+}
+
+/// Decodes a file (resampled to `target_rate`), analyzes it and opens a tuning session.
+/// Returns the analysis as JSON (`TuneAnalysis`) and writes the session handle to `out`
+/// (0 on failure, when the result holds the error message).
+///
+/// # Safety
+/// `data`/`len` must come from [`worker_alloc`] (ownership is taken); `ext`/`ext_len` must be
+/// null/0 or a valid UTF-8 range; `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tune_open(
+    data: *mut u8,
+    len: usize,
+    ext: *const u8,
+    ext_len: usize,
+    target_rate: u32,
+    out: *mut *mut TuneHandle,
+) -> *mut BytesResult {
+    // SAFETY: forwarded.
+    let bytes = unsafe { take_input(data, len) };
+    let ext = if ext.is_null() {
+        None
+    } else {
+        // SAFETY: caller guarantees a valid range.
+        core::str::from_utf8(unsafe { core::slice::from_raw_parts(ext, ext_len) }).ok()
+    };
+    // SAFETY: caller guarantees `out` is writable.
+    unsafe { *out = core::ptr::null_mut() };
+    let imported = match media::import(bytes, ext, target_rate) {
+        Ok(imported) => imported,
+        Err(e) => return bytes_result(Err(e.to_string())),
+    };
+    let session = tune::TuneSession::open(imported.channels, f64::from(target_rate));
+    let json = serde_json::to_vec(&session.describe()).map_err(|e| e.to_string());
+    // SAFETY: as above.
+    unsafe {
+        *out = Box::into_raw(Box::new(TuneHandle {
+            session,
+            regions: Vec::new(),
+        }))
+    };
+    bytes_result(json)
+}
+
+/// Plans playback for `notes` (JSON array of notes), rendering regions whose key isn't in
+/// `known` (JSON array of strings). Returns JSON `{ segments, outputFrames, regions: [{ key,
+/// frames }] }`; region audio is read with [`tune_region_channel`] until the next plan.
+///
+/// # Safety
+/// `session` must be live; the JSON inputs must come from [`worker_alloc`] (ownership taken).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tune_plan(
+    session: *mut TuneHandle,
+    notes: *mut u8,
+    notes_len: usize,
+    known: *mut u8,
+    known_len: usize,
+) -> *mut BytesResult {
+    // SAFETY: forwarded.
+    let (notes, known) = unsafe { (take_input(notes, notes_len), take_input(known, known_len)) };
+    // SAFETY: caller guarantees `session` is live.
+    let Some(h) = (unsafe { session.as_mut() }) else {
+        return bytes_result(Err("no session".into()));
+    };
+    let result = (|| -> Result<Vec<u8>, String> {
+        let notes: Vec<tune::Note> = serde_json::from_slice(&notes).map_err(|e| e.to_string())?;
+        let known: std::collections::HashSet<String> =
+            serde_json::from_slice(&known).map_err(|e| e.to_string())?;
+        let plan = h.session.plan(&notes, &known);
+        let regions: Vec<serde_json::Value> = plan
+            .new_regions
+            .iter()
+            .map(|(key, ch)| serde_json::json!({ "key": key, "frames": ch.first().map_or(0, Vec::len) }))
+            .collect();
+        let json = serde_json::json!({ "segments": plan.segments, "outputFrames": plan.output_frames, "regions": regions });
+        h.regions = plan.new_regions;
+        serde_json::to_vec(&json).map_err(|e| e.to_string())
+    })();
+    bytes_result(result)
+}
+
+/// Samples of channel `ch` of region `index` from the last [`tune_plan`], or null.
+///
+/// # Safety
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tune_region_channel(
+    session: *const TuneHandle,
+    index: usize,
+    ch: usize,
+) -> *const f32 {
+    // SAFETY: caller guarantees `session` is null or live.
+    unsafe { session.as_ref() }
+        .and_then(|h| h.regions.get(index))
+        .and_then(|(_, channels)| channels.get(ch))
+        .map_or(core::ptr::null(), |c| c.as_ptr())
+}
+
+/// Channels in the session's audio (rendered regions have the same count).
+///
+/// # Safety
+/// `session` must be null or live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tune_channels(session: *const TuneHandle) -> u32 {
+    // SAFETY: caller guarantees `session` is null or live.
+    unsafe { session.as_ref() }.map_or(0, |h| h.session.channels() as u32)
+}
+
+/// # Safety
+/// `session` must come from [`tune_open`] and not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tune_close(session: *mut TuneHandle) {
+    if !session.is_null() {
+        // SAFETY: caller guarantees ownership.
+        drop(unsafe { Box::from_raw(session) });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +604,52 @@ mod tests {
                 ),
                 0
             );
+        }
+    }
+
+    #[test]
+    fn tunes_through_the_abi() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tune/tests/fixtures/demo-44100.wav"
+        ))
+        .unwrap();
+        let ptr = worker_alloc(bytes.len());
+        let mut session: *mut TuneHandle = core::ptr::null_mut();
+        unsafe {
+            core::slice::from_raw_parts_mut(ptr, bytes.len()).copy_from_slice(&bytes);
+            let h = tune_open(ptr, bytes.len(), core::ptr::null(), 0, 44_100, &mut session);
+            assert_eq!(bytes_result_ok(h), 1);
+            let analysis: serde_json::Value = serde_json::from_slice(core::slice::from_raw_parts(
+                bytes_result_ptr(h),
+                bytes_result_len(h),
+            ))
+            .unwrap();
+            bytes_result_free(h);
+            assert_eq!(analysis["notes"].as_array().unwrap().len(), 11);
+            assert_eq!(tune_channels(session), 1);
+
+            let mut notes = analysis["notes"].clone();
+            notes[3]["shift"] = serde_json::json!(1.0);
+            let input = |v: &serde_json::Value| {
+                let b = serde_json::to_vec(v).unwrap();
+                let p = worker_alloc(b.len());
+                core::slice::from_raw_parts_mut(p, b.len()).copy_from_slice(&b);
+                (p, b.len())
+            };
+            let ((np, nl), (kp, kl)) = (input(&notes), input(&serde_json::json!([])));
+            let h = tune_plan(session, np, nl, kp, kl);
+            assert_eq!(bytes_result_ok(h), 1);
+            let plan: serde_json::Value = serde_json::from_slice(core::slice::from_raw_parts(
+                bytes_result_ptr(h),
+                bytes_result_len(h),
+            ))
+            .unwrap();
+            bytes_result_free(h);
+            assert_eq!(plan["regions"].as_array().unwrap().len(), 1);
+            assert!(!tune_region_channel(session, 0, 0).is_null());
+            assert!(tune_region_channel(session, 0, 1).is_null());
+            tune_close(session);
         }
     }
 

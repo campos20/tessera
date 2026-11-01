@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod storage;
+mod tune;
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -31,21 +32,21 @@ const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(33);
 /// ever taken by UI-side threads; the audio thread talks to the engine through engine-core's
 /// lock-free queues.
 #[derive(Default)]
-struct AudioState {
+pub(crate) struct AudioState {
     io: Mutex<Option<AudioIo>>,
     config: Mutex<AudioConfig>,
-    next_source_id: AtomicU32,
+    pub(crate) next_source_id: AtomicU32,
 }
 
 impl AudioState {
-    fn lock(&self) -> MutexGuard<'_, Option<AudioIo>> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Option<AudioIo>> {
         self.io
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Starts the streams with the current settings if needed and returns their info.
-    fn ensure_started(&self) -> Result<AudioInfo, String> {
+    pub(crate) fn ensure_started(&self) -> Result<AudioInfo, String> {
         let mut io = self.lock();
         if let Some(io) = io.as_ref() {
             return Ok(io.info().clone());
@@ -281,6 +282,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AudioState::default())
+        .manage(tune::TuneState::default())
         .invoke_handler(tauri::generate_handler![
             audio_start,
             audio_configure,
@@ -299,7 +301,10 @@ fn main() {
             storage::project_delete,
             storage::project_delete_file,
             storage::project_export,
-            storage::project_import
+            storage::project_import,
+            tune::tune_open,
+            tune::tune_plan,
+            tune::tune_close
         ])
         .setup(|app| {
             spawn_event_forwarder(app.handle().clone());
