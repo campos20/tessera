@@ -95,16 +95,30 @@ export class TakeWriter {
     });
   }
 
-  /** Closes every open take and returns all takes. */
+  /**
+   * Closes every open take and returns all takes. Every file is closed even if finalizing one
+   * fails; the first error is rethrown afterwards.
+   */
   finish(): FinishedTake[] {
-    for (const take of [...this.open.values()]) this.close(take);
+    let error: unknown;
+    for (const take of [...this.open.values()]) {
+      try {
+        this.close(take);
+      } catch (e) {
+        error ??= e;
+      }
+    }
+    if (error !== undefined) throw error;
     return this.done;
   }
 
   private close(take: OpenTake) {
-    take.sink.write(wavHeader(take.channels, this.sampleRate, take.frames), 0);
-    take.sink.close();
     this.open.delete(take.track);
+    try {
+      take.sink.write(wavHeader(take.channels, this.sampleRate, take.frames), 0);
+    } finally {
+      take.sink.close();
+    }
     this.done.push({
       track: take.track,
       path: take.path,

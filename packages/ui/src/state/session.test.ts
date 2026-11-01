@@ -6,7 +6,7 @@ import { addClip, addSource, addTrack, newProject } from "../model/edits";
 import { Session } from "./session";
 
 /** A platform whose engine runs at `engineRate`; records every command sent. */
-function fakePlatform(engineRate: number, saved: Project, takes: RecordedTake[] = []) {
+function fakePlatform(engineRate: number, saved: Project, takes: RecordedTake[] | Error = []) {
   const sent: Command[] = [];
   let emit: (event: Event) => void = () => {};
   const storage: ProjectStorage = {
@@ -36,7 +36,10 @@ function fakePlatform(engineRate: number, saved: Project, takes: RecordedTake[] 
       restarted: false,
     }),
     beginRecording: async () => {},
-    endRecording: async () => takes,
+    endRecording: async () => {
+      if (takes instanceof Error) throw takes;
+      return takes;
+    },
     onRecordingProgress: () => () => {},
     onXruns: () => () => {},
     measureLatency: async () => null,
@@ -121,5 +124,20 @@ describe("Session", () => {
     await session.stopRecording();
     const take1 = session.project.tracks[0]!.clips.find((c) => c.name.includes("take"));
     expect(take1?.name).toMatch(/take \d+ \(audio lost\)$/);
+  });
+
+  it("leaves the recording state when finishing the takes fails", async () => {
+    const project = savedProject();
+    const trackId = project.tracks[0]!.id;
+    const { platform } = fakePlatform(44_100, project, new Error("The quota has been exceeded."));
+    const session = new Session(platform);
+    await session.init();
+    await session.toggleArm(trackId);
+    await session.record();
+    expect(session.recording.getState().active).toBe(true);
+
+    await session.stopRecording();
+    expect(session.recording.getState().active).toBe(false);
+    expect(session.ui.getState().error).toMatch(/quota/);
   });
 });

@@ -4,7 +4,8 @@
  * unpacks `.tessera` archives, writes recorded takes and measures latency — off both the main
  * thread and the audio thread.
  */
-import { type CaptureChunk, CaptureRing } from "./captureRing";
+import { CaptureRecorder } from "./captureRecorder";
+import { CaptureRing } from "./captureRing";
 import { type FileSink, type FinishedTake, type Progress, TakeWriter } from "./takeWriter";
 import workerWasmUrl from "./worker.wasm?url";
 import {
@@ -47,12 +48,11 @@ export type WorkerResponse =
 
 declare const self: DedicatedWorkerGlobalScope;
 
-const DRAIN_INTERVAL_MS = 20;
-const PROGRESS_INTERVAL_MS = 100;
+const DRAIN_INTERVAL_MS = 50;
 
 let wasm: Promise<WorkerExports> | undefined;
 let capture: CaptureRing | undefined;
-let recording: { writer: TakeWriter; timer: number; busy: Promise<void>; lastProgress: number } | undefined;
+let recording: { recorder: CaptureRecorder; timer: number } | undefined;
 let idleTimer = 0;
 
 const loadWasm = () =>
@@ -77,49 +77,36 @@ async function openTakeFile(dir: FileSystemDirectoryHandle, path: string): Promi
   return {
     write: (bytes, at) => void handle.write(bytes, { at }),
     close: () => {
-      handle.flush();
-      handle.close();
+      try {
+        handle.flush();
+      } finally {
+        handle.close(); // Always release the file, even if flushing failed.
+      }
     },
   };
-}
-
-/** Copies pending chunks out of the ring (its slots are reused) and writes them in order. */
-function drainInto(writer: TakeWriter): Promise<void> {
-  const chunks: CaptureChunk[] = [];
-  capture!.drain((c) => chunks.push({ ...c, samples: c.samples.slice() }));
-  return chunks.reduce((p, c) => p.then(() => writer.write(c)), Promise.resolve());
 }
 
 async function startRecording(projectId: string, prefix: string, sampleRate: number) {
   if (!capture) throw new Error("capture is not attached");
   if (recording) throw new Error("already recording");
-  capture.drain(() => {}); // Discard anything captured before now.
   const dir = await projectDir(projectId, true);
   const writer = new TakeWriter(sampleRate, prefix, (path) => openTakeFile(dir, path));
-  const r = { writer, timer: 0, busy: Promise.resolve(), lastProgress: 0 };
-  recording = r;
-  r.timer = setInterval(() => {
-    // Chain drains so they never overlap while a new take's file is being opened.
-    r.busy = r.busy
-      .then(() => drainInto(writer))
-      .then(() => {
-        const now = performance.now();
-        if (now - r.lastProgress < PROGRESS_INTERVAL_MS) return;
-        r.lastProgress = now;
-        const progress = writer.progress();
-        if (progress.length) self.postMessage({ event: "recordProgress", progress } satisfies WorkerResponse);
-      });
-  }, DRAIN_INTERVAL_MS) as unknown as number;
+  const recorder = new CaptureRecorder(capture, writer, (progress) => {
+    self.postMessage({ event: "recordProgress", progress } satisfies WorkerResponse);
+  });
+  recording = {
+    recorder,
+    timer: setInterval(() => void recorder.tick(), DRAIN_INTERVAL_MS) as unknown as number,
+  };
 }
 
 async function stopRecording(): Promise<FinishedTake[]> {
   const r = recording;
   if (!r) throw new Error("not recording");
   clearInterval(r.timer);
-  await r.busy;
-  await drainInto(r.writer);
+  // Cleared first: whatever happens while finishing, the next recordStart works.
   recording = undefined;
-  return r.writer.finish();
+  return r.recorder.stop();
 }
 
 async function readTake(

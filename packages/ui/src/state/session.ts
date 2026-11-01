@@ -338,8 +338,13 @@ export class Session {
       this.stop();
       this.platform.send({ type: "SetRecord", enabled: false });
       await new Promise((r) => setTimeout(r, STOP_SETTLE_MS));
-      const takes = (await this.platform.endRecording()).filter((t) => t.frames >= MIN_TAKE_FRAMES);
-      this.recording.setState({ active: false, live: new Map() });
+      let takes: RecordedTake[];
+      try {
+        takes = (await this.platform.endRecording()).filter((t) => t.frames >= MIN_TAKE_FRAMES);
+      } finally {
+        // Leave the recording state even if finishing failed, so Record works again.
+        this.recording.setState({ active: false, live: new Map() });
+      }
       if (takes.length) await this.placeTakes(takes);
     });
   }
