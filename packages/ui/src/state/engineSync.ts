@@ -350,25 +350,35 @@ function clipIndex(project: Project | undefined) {
   return map;
 }
 
-/** Commands that turn the previous insert chains (tracks and master) into the next ones. */
+const deviceInfo = (kind: string) => DEVICES[kind as DeviceKind] as (typeof DEVICES)[DeviceKind] | undefined;
+
+/**
+ * Commands that turn the previous insert chains (tracks and master) into the next ones.
+ * Devices of unknown kinds (from a newer version) are never in the engine: they are left out
+ * of both sides, so a device whose kind becomes unknown is removed, and positions count only
+ * the devices the engine has.
+ */
 function diffDevices(prev: Project | undefined, next: Project, out: Command[]) {
-  const chains = (p: Project | undefined): [number, Device[]][] =>
-    p ? [[MASTER_TRACK, p.masterInserts], ...p.tracks.map((t): [number, Device[]] => [t.id, t.inserts])] : [];
+  const chains = (p: Project | undefined): [number, Device[], Device[]][] =>
+    p
+      ? [[MASTER_TRACK, p.masterInserts] as const, ...p.tracks.map((t) => [t.id, t.inserts] as const)].map(
+          ([owner, chain]) => [owner, chain, chain.filter((d) => deviceInfo(d.kind))],
+        )
+      : [];
   const before = new Map<number, { owner: number; index: number; device: Device }>();
-  const prevChains = new Map(chains(prev));
-  for (const [owner, chain] of prevChains)
-    chain.forEach((device, index) => before.set(device.id, { owner, index, device }));
+  const prevChains = new Map(chains(prev).map(([owner, chain]) => [owner, chain]));
+  for (const [owner, , known] of chains(prev))
+    known.forEach((device, index) => before.set(device.id, { owner, index, device }));
   const nextChains = chains(next);
-  const after = new Set(nextChains.flatMap(([, chain]) => chain.map((d) => d.id)));
+  const after = new Set(nextChains.flatMap(([, , known]) => known.map((d) => d.id)));
   for (const id of before.keys()) if (!after.has(id)) out.push({ type: "RemoveDevice", device: id });
 
-  for (const [owner, chain] of nextChains) {
+  for (const [owner, chain, known] of nextChains) {
     if (prevChains.get(owner) === chain) continue;
     // Place each device at its index in turn; earlier positions are then already right.
     let reordered = false;
-    chain.forEach((device, index) => {
-      const info = DEVICES[device.kind as DeviceKind] as (typeof DEVICES)[DeviceKind] | undefined;
-      if (!info) return; // Unknown kind (newer project): not in the engine.
+    known.forEach((device, index) => {
+      const info = deviceInfo(device.kind)!;
       const old = before.get(device.id);
       const fresh = !old || old.device.kind !== device.kind;
       if (fresh) {
@@ -404,7 +414,7 @@ function engineTarget(track: Track, lane: Lane): AutomationTarget | undefined {
     }
     case "param": {
       const device = track.inserts.find((d) => d.id === t.device);
-      const info = device && (DEVICES[device.kind as DeviceKind] as (typeof DEVICES)[DeviceKind] | undefined);
+      const info = device && deviceInfo(device.kind);
       const index = info?.params.findIndex((p) => p.id === t.param) ?? -1;
       return index >= 0 ? { kind: 3, index, device: t.device } : undefined;
     }

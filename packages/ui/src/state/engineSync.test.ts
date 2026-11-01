@@ -292,4 +292,32 @@ describe("EngineSync with Tune", () => {
     sync.sync(produce(p1, (p) => removeDevice(p, eq)));
     expect(sent).toContainEqual({ type: "RemoveAutomation", lane: lane + 2 });
   });
+
+  it("removes a device (and its automation) when its kind becomes unknown", () => {
+    const { sent, sync, ids, project } = setup();
+    let unknown = 0;
+    let eq = 0;
+    let lane = 0;
+    const p1 = produce(project, (p) => {
+      unknown = addDevice(p, ids.track, "eq")!;
+      p.tracks[0]!.inserts[0]!.kind = "future-device";
+      eq = addDevice(p, ids.track, "eq")!;
+      lane = ensureLane(p, ids.track, { kind: "param", device: eq, param: "b1Gain" })!;
+      addPoint(p, lane, 0, 3);
+    });
+    sync.sync(p1);
+    // Positions count only devices the engine has.
+    expect(sent).toContainEqual({
+      type: "AddDevice",
+      device: eq,
+      track: ids.track,
+      position: 0,
+      kind: DEVICES.eq.code,
+    });
+    expect(sent.some((c) => c.type === "AddDevice" && c.device === unknown)).toBe(false);
+    sent.length = 0;
+    sync.sync(produce(p1, (p) => void (p.tracks[0]!.inserts[1]!.kind = "future-device")));
+    expect(sent).toContainEqual({ type: "RemoveDevice", device: eq });
+    expect(sent).toContainEqual({ type: "RemoveAutomation", lane });
+  });
 });
