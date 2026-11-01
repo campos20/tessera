@@ -4,8 +4,8 @@
  * REAL-TIME: nothing in `process()` may allocate. Views over WASM memory are only rebuilt
  * when the memory has grown, which only happens in the message handler (source uploads).
  */
-import { MAX_ARGS } from "@tessera/schema";
-import { CaptureRing, CHUNK_SAMPLES } from "./captureRing";
+import { EventLayout, MAX_ARGS } from "@tessera/schema";
+import { CaptureRing, CHUNK_SAMPLES, pumpCapture } from "./captureRing";
 import { MessageRing } from "./messageRing";
 import { PROCESSOR_NAME, type ProcessorOptions, type WorkletReply, type WorkletRequest } from "./protocol";
 import { type EngineExports, instantiateEngine } from "./wasmEngine";
@@ -28,6 +28,10 @@ class TesseraProcessor extends AudioWorkletProcessor {
   private readonly commands: MessageRing;
   private readonly events: MessageRing;
   private readonly capture: CaptureRing;
+  private readonly pollCapture: () => boolean;
+  private readonly reportOverrun: (track: number) => void;
+  /** Preallocated arguments for overrun events (no allocation in `process()`). */
+  private readonly overrunArgs = new Float64Array(MAX_ARGS);
   private readonly pending = new Map<number, number>();
   private readonly sink: (op: number, args: Float64Array, base: number) => void;
   private memoryBuffer: ArrayBuffer | SharedArrayBuffer;
@@ -49,6 +53,12 @@ class TesseraProcessor extends AudioWorkletProcessor {
     this.commands = new MessageRing(opts.commands, opts.ringCapacity);
     this.events = new MessageRing(opts.events, opts.ringCapacity);
     this.capture = new CaptureRing(opts.capture, opts.captureCapacity);
+    this.pollCapture = () => this.engine.tessera_poll_capture(this.handle) !== 0;
+    this.reportOverrun = (track) => {
+      // Same event the native engine emits when its own capture queue overflows.
+      this.overrunArgs[0] = track;
+      this.events.push(EventLayout.CaptureOverrun.op, this.overrunArgs);
+    };
     this.memoryBuffer = this.engine.memory.buffer;
     this.refreshViews(QUANTUM);
     this.sink = (op, args, base) => {
@@ -88,9 +98,7 @@ class TesseraProcessor extends AudioWorkletProcessor {
       this.events.push(op, this.eventArgs);
     }
     // Captured input goes straight to the background worker, which writes the takes.
-    while (this.engine.tessera_poll_capture(this.handle)) {
-      this.capture.push(this.captureInfo, this.captureData);
-    }
+    pumpCapture(this.pollCapture, this.captureInfo, this.captureData, this.capture, this.reportOverrun);
     return true;
   }
 

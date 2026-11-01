@@ -121,6 +121,8 @@ export class Session {
   private readonly sync: EngineSync;
   /** Set by `seek`: engine reports from before the seek are ignored until they catch up. */
   private pendingSeek: { frame: number; until: number } | undefined;
+  /** Tracks that lost captured audio during the current recording. */
+  private readonly overrunTracks = new Set<number>();
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private saving: Promise<void> = Promise.resolve();
   /** Serializes project loads, imports and saves. */
@@ -323,6 +325,7 @@ export class Session {
       });
       this.platform.send({ type: "SetRecord", enabled: true });
       this.platform.send({ type: "Play" });
+      this.overrunTracks.clear();
       this.recording.setState({ active: true, live: new Map() });
       this.transport.setState({ playing: true, reportedAt: performance.now() });
     });
@@ -375,7 +378,9 @@ export class Session {
         if (clip) {
           clip.offset = offset;
           clip.length = frames - offset;
-          clip.name = `${track.name} take ${takeNumber}`;
+          // Make lost audio visible on the clip itself, not just in a transient message.
+          const lost = this.overrunTracks.has(track.id) ? " (audio lost)" : "";
+          clip.name = `${track.name} take ${takeNumber}${lost}`;
         }
         placed.push({ take, sourceId });
       }
@@ -679,11 +684,15 @@ export class Session {
       case "InputMeter":
         this.transport.setState((s) => ({ inputs: new Map(s.inputs).set(event.track, event) }));
         break;
-      case "CaptureOverrun":
+      case "CaptureOverrun": {
+        // Remember the track so its take is marked, and say which track lost audio.
+        if (this.recording.getState().active) this.overrunTracks.add(event.track);
+        const name = this.project.tracks.find((t) => t.id === event.track)?.name ?? "a track";
         this.reportError(
-          "Recording fell behind and some audio was lost. Try a larger buffer or fewer armed tracks.",
+          `Recording fell behind and audio was lost on "${name}"; its take has a gap. Try a larger buffer or fewer armed tracks.`,
         );
         break;
+      }
       case "MasterMeter":
         this.transport.setState({ master: event });
         break;

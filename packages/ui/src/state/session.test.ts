@@ -1,13 +1,14 @@
-import type { AudioPlatform, ProjectStorage } from "@tessera/platform";
-import type { Command, Project, SourceInfo } from "@tessera/schema";
+import type { AudioPlatform, ProjectStorage, RecordedTake } from "@tessera/platform";
+import type { Command, Event, Project, SourceInfo } from "@tessera/schema";
 import { produce } from "immer";
 import { describe, expect, it } from "vitest";
 import { addClip, addSource, addTrack, newProject } from "../model/edits";
 import { Session } from "./session";
 
 /** A platform whose engine runs at `engineRate`; records every command sent. */
-function fakePlatform(engineRate: number, saved: Project) {
+function fakePlatform(engineRate: number, saved: Project, takes: RecordedTake[] = []) {
   const sent: Command[] = [];
+  let emit: (event: Event) => void = () => {};
   const storage: ProjectStorage = {
     list: async () => [{ id: saved.id, name: saved.name, modifiedAt: saved.modifiedAt }],
     open: async () => saved,
@@ -35,12 +36,15 @@ function fakePlatform(engineRate: number, saved: Project) {
       restarted: false,
     }),
     beginRecording: async () => {},
-    endRecording: async () => [],
+    endRecording: async () => takes,
     onRecordingProgress: () => () => {},
     onXruns: () => () => {},
     measureLatency: async () => null,
     send: (c) => void sent.push(c),
-    onEvent: () => () => {},
+    onEvent: (listener) => {
+      emit = listener;
+      return () => {};
+    },
     // One second of audio, reported (like the real platforms) at the engine rate.
     importAudio: async (file): Promise<SourceInfo> => ({
       id: nextSource++,
@@ -54,7 +58,7 @@ function fakePlatform(engineRate: number, saved: Project) {
     listDevices: async () => ({ hosts: [] }),
     diagnostics: async () => ({}),
   };
-  return { platform, sent };
+  return { platform, sent, emit: (event: Event) => emit(event) };
 }
 
 /** A saved project with one 1 s clip at 2 s (project frames, 48 kHz). */
@@ -99,5 +103,23 @@ describe("Session", () => {
     expect(sent.at(-1)).toEqual({ type: "Seek", frame: 96_000 });
     await session.startEngine();
     expect(sent.filter((c) => c.type === "Seek").at(-1)).toEqual({ type: "Seek", frame: 88_200 });
+  });
+
+  it("names the track that lost audio and marks its take", async () => {
+    const project = savedProject();
+    const trackId = project.tracks[0]!.id;
+    const take = { track: trackId, path: "audio/rec-1.wav", start: 0, frames: 44_100, channels: 1 };
+    const { platform, emit } = fakePlatform(44_100, project, [take]);
+    const session = new Session(platform);
+    await session.init();
+    await session.toggleArm(trackId);
+    await session.record();
+
+    emit({ type: "CaptureOverrun", track: trackId });
+    expect(session.ui.getState().error).toMatch(/audio was lost on "Track 1"/);
+
+    await session.stopRecording();
+    const take1 = session.project.tracks[0]!.clips.find((c) => c.name.includes("take"));
+    expect(take1?.name).toMatch(/take \d+ \(audio lost\)$/);
   });
 });

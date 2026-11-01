@@ -88,3 +88,21 @@ export class CaptureRing {
     return count;
   }
 }
+
+/**
+ * Moves captured chunks from the engine into the ring (called from the worklet's `process()`,
+ * allocation-free). `poll` loads the next chunk into `info` (`[track, start, frames,
+ * channels]`) and `data`, returning false when there are none. Chunks that don't fit because
+ * the worker fell behind are reported per track through `overrun`, never dropped silently.
+ */
+export function pumpCapture(
+  poll: () => boolean,
+  info: Float64Array,
+  data: Float32Array,
+  ring: CaptureRing,
+  overrun: (track: number) => void,
+): void {
+  while (poll()) {
+    if (!ring.push(info, data)) overrun(info[0]!);
+  }
+}

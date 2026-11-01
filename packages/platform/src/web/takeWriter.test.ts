@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { type CaptureChunk, CaptureRing } from "./captureRing";
+import { type CaptureChunk, CaptureRing, pumpCapture } from "./captureRing";
 import { type FileSink, TakeWriter } from "./takeWriter";
 import { decodeAudio, type WorkerExports } from "./workerWasm";
 
@@ -57,5 +57,25 @@ describe("capture → takes", () => {
     const samples = new Float32Array(256);
     expect(ring.push(meta, samples) && ring.push(meta, samples)).toBe(true);
     expect(ring.push(meta, samples)).toBe(false);
+  });
+});
+
+describe("pumpCapture", () => {
+  it("reports chunks that don't fit in the ring instead of dropping them silently", () => {
+    const ring = CaptureRing.create(2);
+    const info = new Float64Array(4);
+    const data = new Float32Array(512);
+    // The engine has five chunks queued: track 3, then 4, 3, 4, 3.
+    const queued = [3, 4, 3, 4, 3];
+    const poll = () => {
+      const track = queued.shift();
+      if (track === undefined) return false;
+      info.set([track, 0, 256, 1]);
+      return true;
+    };
+    const overruns: number[] = [];
+    pumpCapture(poll, info, data, ring, (track) => overruns.push(track));
+    expect(overruns).toEqual([3, 4, 3]);
+    expect(ring.drain(() => {})).toBe(2);
   });
 });
