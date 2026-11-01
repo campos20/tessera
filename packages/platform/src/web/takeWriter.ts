@@ -10,6 +10,30 @@ export interface FileSink {
   close(): void;
 }
 
+/**
+ * Writes all of `bytes` at `at` through a positional `write` that may write fewer bytes than
+ * asked (as `FileSystemSyncAccessHandle.write` does when storage runs low): continues with the
+ * rest, and throws if a write makes no progress, so a truncated take fails loudly instead of
+ * getting a header that claims samples it doesn't contain.
+ */
+export function writeFully(
+  write: (bytes: Uint8Array, at: number) => number,
+  bytes: Uint8Array,
+  at: number,
+): void {
+  let done = 0;
+  while (done < bytes.length) {
+    const written = write(bytes.subarray(done), at + done);
+    if (!(written > 0)) {
+      throw new DOMException(
+        `Only ${done} of ${bytes.length} bytes could be written (storage may be full).`,
+        "QuotaExceededError",
+      );
+    }
+    done += written;
+  }
+}
+
 export interface FinishedTake {
   track: number;
   path: string;

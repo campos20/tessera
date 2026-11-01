@@ -6,7 +6,7 @@
  */
 import { CaptureRecorder } from "./captureRecorder";
 import { CaptureRing } from "./captureRing";
-import { type FileSink, type FinishedTake, type Progress, TakeWriter } from "./takeWriter";
+import { type FileSink, type FinishedTake, type Progress, TakeWriter, writeFully } from "./takeWriter";
 import workerWasmUrl from "./worker.wasm?url";
 import {
   type ArchiveEntry,
@@ -75,7 +75,8 @@ async function openTakeFile(dir: FileSystemDirectoryHandle, path: string): Promi
   const handle = await file.createSyncAccessHandle();
   handle.truncate(0);
   return {
-    write: (bytes, at) => void handle.write(bytes, { at }),
+    // `write` may report a short write when storage runs low; writeFully throws instead.
+    write: (bytes, at) => writeFully((b, offset) => handle.write(b, { at: offset }), bytes, at),
     close: () => {
       try {
         handle.flush();
