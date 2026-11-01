@@ -47,6 +47,7 @@ export class WebPlatform implements AudioPlatform {
   private events: MessageRing | undefined;
   private readonly listeners = new Set<EngineEventListener>();
   private pollHandle = 0;
+  private warnedNotIsolated = false;
 
   private nextSeq = 1;
   private readonly workletRequests = new Map<number, Pending<void>>();
@@ -61,6 +62,14 @@ export class WebPlatform implements AudioPlatform {
   }
 
   send(command: Command): void {
+    // Without cross-origin isolation there is no engine to talk to. Don't throw from here:
+    // `start()` reports the problem, and on hosts using coi-sw.js the page reloads isolated.
+    if (!globalThis.crossOriginIsolated) {
+      if (!this.warnedNotIsolated)
+        console.warn("tessera: not cross-origin isolated; engine commands are dropped");
+      this.warnedNotIsolated = true;
+      return;
+    }
     const op = encodeCommand(command, this.commandArgs);
     if (!this.commandRing().push(op, this.commandArgs)) {
       console.warn("tessera: command ring full, dropped", command);

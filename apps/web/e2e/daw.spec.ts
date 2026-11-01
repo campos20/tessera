@@ -65,9 +65,15 @@ async function at(locator: Locator, x: number, y: number) {
 // Default zoom: 1200 project frames per px; snapping grid at this zoom: eighth notes = 10 px.
 const FRAMES_PER_PX = 1200;
 
-test("page is cross-origin isolated", async ({ page }) => {
+test("page is cross-origin isolated and the first visit creates exactly one project", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
   await open(page);
   expect(await page.evaluate(() => globalThis.crossOriginIsolated)).toBe(true);
+  // On hosts that need coi-sw.js the page reloads once; the app must not boot before that.
+  await page.getByRole("button", { name: /Untitled/ }).click();
+  await expect(page.locator(".menu-project")).toHaveCount(1);
+  expect(errors).toEqual([]);
 });
 
 test("create, edit, save, reload and keep editing a project", async ({ page }) => {
