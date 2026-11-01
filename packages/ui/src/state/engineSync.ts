@@ -60,6 +60,12 @@ export class EngineSync {
     this.synced = next;
   }
 
+  /** Sends the whole project again (after something else changed engine state directly). */
+  resend(project: Project) {
+    this.synced = undefined;
+    this.sync(project);
+  }
+
   /**
    * Empties the engine before another project is loaded: removes every track (and with it
    * every clip) and releases all audio. Audio is otherwise kept for the whole session, so
@@ -140,6 +146,14 @@ export function diffProject(prev: Project | undefined, next: Project, sync: Engi
       out.push({ type: "SetTrackMute", track: track.id, mute: track.mute });
     if (!old || old.solo !== track.solo)
       out.push({ type: "SetTrackSolo", track: track.id, solo: track.solo });
+    if (!old || old.inputChannel !== track.inputChannel || old.inputStereo !== track.inputStereo) {
+      out.push({
+        type: "SetTrackInput",
+        track: track.id,
+        channel: track.inputChannel,
+        stereo: track.inputStereo,
+      });
+    }
   }
 
   for (const [id, { track, clip }] of nextClips) {

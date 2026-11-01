@@ -8,8 +8,11 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use engine_core::{Command, Event};
-use engine_native::{AudioDeviceList, AudioOutput, OutputInfo, import_source};
+use engine_native::{
+    AudioConfig, AudioDeviceList, AudioInfo, AudioIo, RecordedTake, TakeProgress, import_source,
+};
 use media::SourceInfo;
+use serde::Serialize;
 use tauri::ipc::{InvokeBody, Request};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -18,41 +21,131 @@ use tauri::{AppHandle, Emitter, Manager, State};
 #[global_allocator]
 static ALLOCATOR: assert_no_alloc::AllocDisabler = assert_no_alloc::AllocDisabler;
 
-/// Must match `ENGINE_EVENTS` in packages/platform/src/tauri.
+/// Must match the event names in packages/platform/src/tauri.
 const ENGINE_EVENTS: &str = "engine-events";
+const RECORDING_PROGRESS: &str = "recording-progress";
+const AUDIO_XRUNS: &str = "audio-xruns";
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(33);
 
-/// The running output stream. The mutex is only ever taken by UI-side threads; the audio
-/// thread talks to the engine through engine-core's lock-free queues.
+/// The running audio streams and the settings they were opened with. The mutexes are only
+/// ever taken by UI-side threads; the audio thread talks to the engine through engine-core's
+/// lock-free queues.
 #[derive(Default)]
 struct AudioState {
-    output: Mutex<Option<AudioOutput>>,
+    io: Mutex<Option<AudioIo>>,
+    config: Mutex<AudioConfig>,
     next_source_id: AtomicU32,
 }
 
 impl AudioState {
-    fn lock(&self) -> MutexGuard<'_, Option<AudioOutput>> {
-        self.output
+    fn lock(&self) -> MutexGuard<'_, Option<AudioIo>> {
+        self.io
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Starts the default output if needed and returns its info.
-    fn ensure_started(&self) -> Result<OutputInfo, String> {
-        let mut output = self.lock();
-        if let Some(output) = output.as_ref() {
-            return Ok(output.info().clone());
+    /// Starts the streams with the current settings if needed and returns their info.
+    fn ensure_started(&self) -> Result<AudioInfo, String> {
+        let mut io = self.lock();
+        if let Some(io) = io.as_ref() {
+            return Ok(io.info().clone());
         }
-        let started = AudioOutput::start_default().map_err(|e| e.to_string())?;
+        let config = self
+            .config
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let started = AudioIo::start(&config).map_err(|e| e.to_string())?;
         let info = started.info().clone();
-        *output = Some(started);
+        *io = Some(started);
         Ok(info)
     }
 }
 
 #[tauri::command]
-fn audio_start(state: State<'_, AudioState>) -> Result<OutputInfo, String> {
+fn audio_start(state: State<'_, AudioState>) -> Result<AudioInfo, String> {
     state.ensure_started()
+}
+
+/// Reopens the streams with new settings. The engine restarts empty: the UI resends the
+/// project and reloads its audio.
+#[tauri::command]
+async fn audio_configure(
+    state: State<'_, AudioState>,
+    config: AudioConfig,
+) -> Result<AudioInfo, String> {
+    let mut io = state.lock();
+    // Stop the old streams first: some drivers (ASIO) allow only one client.
+    drop(io.take());
+    let started = AudioIo::start(&config).map_err(|e| e.to_string())?;
+    let info = started.info().clone();
+    *io = Some(started);
+    *state.config.lock().unwrap_or_else(|p| p.into_inner()) = config;
+    Ok(info)
+}
+
+/// Starts writing armed tracks' input to WAV files in the project's `audio/` folder.
+#[tauri::command]
+async fn recording_begin(
+    app: AppHandle,
+    state: State<'_, AudioState>,
+    project_id: String,
+    prefix: String,
+) -> Result<(), String> {
+    let dir = storage::project_audio_dir(&app, &project_id)?;
+    let mut io = state.lock();
+    io.as_mut()
+        .ok_or("audio engine not started")?
+        .begin_recording(dir, prefix)
+}
+
+/// Finishes the takes; their `file`s are inside the project's `audio/` folder.
+#[tauri::command]
+async fn recording_end(state: State<'_, AudioState>) -> Result<Vec<RecordedTake>, String> {
+    let mut io = state.lock();
+    io.as_mut()
+        .ok_or("audio engine not started")?
+        .end_recording()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Latency {
+    frames: usize,
+    confidence: f32,
+}
+
+/// Measures round-trip latency from a calibration take of the metronome at `bpm` that
+/// started at timeline frame 0.
+#[tauri::command]
+async fn measure_latency(
+    app: AppHandle,
+    project_id: String,
+    path: String,
+    bpm: f64,
+) -> Result<Option<Latency>, String> {
+    let bytes = std::fs::read(storage::project_file_path(&app, &project_id, &path)?)
+        .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let decoded = media::decode(bytes, Some("wav")).map_err(|e| e.to_string())?;
+        let recorded = &decoded.channels[0];
+        let reference = engine_core::calibration::click_track(
+            f64::from(decoded.sample_rate),
+            bpm,
+            recorded.len(),
+        );
+        let max_lag = decoded.sample_rate as usize / 2;
+        Ok(
+            engine_core::calibration::measure_latency(&reference, recorded, max_lag).map(|m| {
+                Latency {
+                    frames: m.frames,
+                    confidence: m.confidence,
+                }
+            }),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -65,7 +158,7 @@ fn audio_send(state: State<'_, AudioState>, command: Command) -> Result<(), Stri
 }
 
 #[tauri::command]
-fn audio_info(state: State<'_, AudioState>) -> Option<OutputInfo> {
+fn audio_info(state: State<'_, AudioState>) -> Option<AudioInfo> {
     state.lock().as_ref().map(|o| o.info().clone())
 }
 
@@ -136,10 +229,16 @@ fn spawn_event_forwarder(app: AppHandle) {
         .name("tessera-events".into())
         .spawn(move || {
             let mut batch: Vec<Event> = Vec::new();
+            let mut progress: Vec<TakeProgress> = Vec::new();
+            let mut last_xruns = 0;
             loop {
                 std::thread::sleep(EVENT_POLL_INTERVAL);
                 batch.clear();
+                progress.clear();
+                let mut xruns = last_xruns;
                 if let Some(output) = app.state::<AudioState>().lock().as_mut() {
+                    progress = output.poll_recording_progress();
+                    xruns = output.xruns();
                     while let Some(event) = output.poll_event() {
                         let same_slot = |e: &Event| match (e, &event) {
                             (Event::Transport { .. }, Event::Transport { .. })
@@ -147,6 +246,10 @@ fn spawn_event_forwarder(app: AppHandle) {
                             (
                                 Event::TrackMeter { track: a, .. },
                                 Event::TrackMeter { track: b, .. },
+                            )
+                            | (
+                                Event::InputMeter { track: a, .. },
+                                Event::InputMeter { track: b, .. },
                             ) => a == b,
                             _ => false,
                         };
@@ -159,6 +262,13 @@ fn spawn_event_forwarder(app: AppHandle) {
                 }
                 if !batch.is_empty() {
                     let _ = app.emit(ENGINE_EVENTS, &batch);
+                }
+                if !progress.is_empty() {
+                    let _ = app.emit(RECORDING_PROGRESS, &progress);
+                }
+                if xruns != last_xruns {
+                    last_xruns = xruns;
+                    let _ = app.emit(AUDIO_XRUNS, xruns);
                 }
             }
         })
@@ -173,6 +283,10 @@ fn main() {
         .manage(AudioState::default())
         .invoke_handler(tauri::generate_handler![
             audio_start,
+            audio_configure,
+            recording_begin,
+            recording_end,
+            measure_latency,
             audio_send,
             audio_info,
             list_devices,
@@ -183,6 +297,7 @@ fn main() {
             storage::project_write_file,
             storage::project_read_file,
             storage::project_delete,
+            storage::project_delete_file,
             storage::project_export,
             storage::project_import
         ])

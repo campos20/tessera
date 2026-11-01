@@ -3,4 +3,4 @@
 /**
  * Engine → UI. Meter values are linear amplitudes over the last meter interval (~33 ms).
  */
-export type Event = { "type": "Transport", playing: boolean, position: number, } | { "type": "TrackMeter", track: number, peakL: number, peakR: number, rmsL: number, rmsR: number, } | { "type": "MasterMeter", peakL: number, peakR: number, rmsL: number, rmsR: number, };
+export type Event = { "type": "Transport", playing: boolean, position: number, recording: boolean, countingIn: boolean, } | { "type": "TrackMeter", track: number, peakL: number, peakR: number, rmsL: number, rmsR: number, } | { "type": "MasterMeter", peakL: number, peakR: number, rmsL: number, rmsR: number, } | { "type": "InputMeter", track: number, peakL: number, peakR: number, } | { "type": "CaptureOverrun", track: number, };

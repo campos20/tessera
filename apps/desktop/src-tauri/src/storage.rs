@@ -36,6 +36,16 @@ fn project_file(app: &AppHandle, id: &str, path: &str) -> Result<PathBuf, String
     file_in(&projects_dir(app)?, id, path)
 }
 
+/// Where recorded takes are written.
+pub fn project_audio_dir(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
+    Ok(project_dir(app, id)?.join("audio"))
+}
+
+/// A validated path to a file inside a project.
+pub fn project_file_path(app: &AppHandle, id: &str, path: &str) -> Result<PathBuf, String> {
+    project_file(app, id, path)
+}
+
 fn dir_in(root: &Path, id: &str) -> Result<PathBuf, String> {
     let valid = !id.is_empty()
         && id.len() <= 64
@@ -139,6 +149,14 @@ pub async fn project_read_file(
 ) -> Result<Response, String> {
     let bytes = std::fs::read(project_file(&app, &id, &path)?).map_err(|e| e.to_string())?;
     Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+pub async fn project_delete_file(app: AppHandle, id: String, path: String) -> Result<(), String> {
+    match std::fs::remove_file(project_file(&app, &id, &path)?) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
 }
 
 #[tauri::command]

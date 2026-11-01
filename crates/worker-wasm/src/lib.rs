@@ -321,6 +321,42 @@ pub unsafe extern "C" fn bytes_result_free(handle: *mut BytesResult) {
     }
 }
 
+/// Measures round-trip latency from a calibration take (mono `f32` samples, recorded from
+/// timeline frame 0 while the metronome played at `bpm`). Writes `[frames, confidence]` to
+/// `out` and returns 1, or returns 0 when nothing recognizable was recorded.
+///
+/// # Safety
+/// `samples` must point to `frames` readable `f32`s and `out` to 2 writable `f64`s.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn calibration_measure(
+    samples: *const f32,
+    frames: usize,
+    sample_rate: f64,
+    bpm: f64,
+    max_lag: usize,
+    out: *mut f64,
+) -> u32 {
+    if samples.is_null() || out.is_null() {
+        return 0;
+    }
+    // SAFETY: caller guarantees both ranges.
+    let (recorded, out) = unsafe {
+        (
+            core::slice::from_raw_parts(samples, frames),
+            core::slice::from_raw_parts_mut(out, 2),
+        )
+    };
+    let reference = engine_core::calibration::click_track(sample_rate, bpm, frames);
+    match engine_core::calibration::measure_latency(&reference, recorded, max_lag) {
+        Some(m) => {
+            out[0] = m.frames as f64;
+            out[1] = f64::from(m.confidence);
+            1
+        }
+        None => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,6 +441,47 @@ mod tests {
             let err = call(project_load, br#"{"schemaVersion": 99}"#).unwrap_err();
             assert!(err.contains("newer version"), "{err}");
             assert!(call(project_load, b"nope").is_err());
+        }
+    }
+
+    #[test]
+    fn measures_latency_through_the_abi() {
+        let latency = 777;
+        let reference = engine_core::calibration::click_track(48_000.0, 120.0, 48_000);
+        let recorded: Vec<f32> = (0..48_000)
+            .map(|i| {
+                if i >= latency {
+                    reference[i - latency] * 0.5
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut out = [0.0f64; 2];
+        unsafe {
+            assert_eq!(
+                calibration_measure(
+                    recorded.as_ptr(),
+                    recorded.len(),
+                    48_000.0,
+                    120.0,
+                    4_000,
+                    out.as_mut_ptr()
+                ),
+                1
+            );
+            assert_eq!(out[0], latency as f64);
+            assert_eq!(
+                calibration_measure(
+                    vec![0.0f32; 100].as_ptr(),
+                    100,
+                    48_000.0,
+                    120.0,
+                    10,
+                    out.as_mut_ptr()
+                ),
+                0
+            );
         }
     }
 

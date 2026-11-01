@@ -12,6 +12,24 @@ pub const MAX_SOURCES: usize = 1024;
 pub const BLOCK_FRAMES: usize = 256;
 pub const MESSAGE_QUEUE_CAPACITY: usize = 4096;
 pub const EVENT_QUEUE_CAPACITY: usize = 4096;
+/// Frames per [`CaptureChunk`] (one render block).
+pub const CAPTURE_CHUNK_FRAMES: usize = BLOCK_FRAMES;
+/// Capture queue length in chunks: ~10 s of one armed track at 48 kHz before overrun.
+pub const CAPTURE_QUEUE_CAPACITY: usize = 2048;
+
+/// A slice of captured input for one armed track, stamped with the timeline frame of its
+/// first sample (before latency compensation). Consecutive chunks of a take have contiguous
+/// `start`s; a jump (loop pass, punch, re-record) starts a new take.
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureChunk {
+    pub track: u32,
+    pub start: u64,
+    pub frames: u32,
+    /// 1 (mono) or 2 (stereo).
+    pub channels: u32,
+    /// Interleaved samples; only the first `frames * channels` are valid.
+    pub data: [f32; 2 * CAPTURE_CHUNK_FRAMES],
+}
 
 /// Smoothing time constant for gain, pan, mute/solo and the stop fade.
 const SMOOTHING_SECONDS: f64 = 0.005;
@@ -35,6 +53,7 @@ pub struct EngineController {
     messages: Producer<Message>,
     events: Consumer<Event>,
     garbage: Consumer<Arc<AudioBuffer>>,
+    capture: Option<Consumer<CaptureChunk>>,
 }
 
 impl EngineController {
@@ -65,6 +84,12 @@ impl EngineController {
 
     pub fn poll_event(&mut self) -> Option<Event> {
         self.events.pop().ok()
+    }
+
+    /// The captured-input queue. Taken once, by whatever writes takes to disk (it may live on
+    /// its own thread).
+    pub fn take_capture(&mut self) -> Option<Consumer<CaptureChunk>> {
+        self.capture.take()
     }
 
     /// Frees audio the engine has released. Call regularly from a non-audio thread.
@@ -124,6 +149,13 @@ struct Track {
     /// right after `AddTrack` apply without a ramp from unity.
     snap: bool,
     meter: MeterAcc,
+    armed: bool,
+    monitor: bool,
+    input_channel: usize,
+    input_stereo: bool,
+    input_meter: MeterAcc,
+    /// A capture chunk was dropped since the last meter event.
+    overrun: bool,
 }
 
 impl Track {
@@ -138,7 +170,32 @@ impl Track {
             current_r: 1.0,
             snap: true,
             meter: MeterAcc::default(),
+            armed: false,
+            monitor: false,
+            input_channel: 0,
+            input_stereo: false,
+            input_meter: MeterAcc::default(),
+            overrun: false,
         }
+    }
+
+    /// Reads this track's input for frame `i` of an interleaved block (missing channels are 0).
+    #[inline]
+    fn input_frame(&self, input: &[f32], in_channels: usize, i: usize) -> (f32, f32) {
+        let at = |ch: usize| {
+            if ch < in_channels {
+                input.get(i * in_channels + ch).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            }
+        };
+        let l = at(self.input_channel);
+        let r = if self.input_stereo {
+            at(self.input_channel + 1)
+        } else {
+            l
+        };
+        (l, r)
     }
 
     /// Balance pan law: unity at the center, so an untouched track nulls against its source.
@@ -202,6 +259,10 @@ pub struct Engine {
     track_buf: Vec<f32>,
     master_l: Vec<f32>,
     master_r: Vec<f32>,
+    /// Per-frame transport level for the block (the stop fade), applied to playback only.
+    transport_ramp: Vec<f32>,
+    metronome_l: Vec<f32>,
+    metronome_r: Vec<f32>,
 
     playing: bool,
     /// 1 while playing; fades to 0 after Stop, then the transport halts.
@@ -212,6 +273,17 @@ pub struct Engine {
     loop_end: u64,
     tempo: f64,
     metronome: Metronome,
+
+    record_enabled: bool,
+    punch_enabled: bool,
+    punch_start: u64,
+    punch_end: u64,
+    count_in_frames: u64,
+    /// Frames of count-in left; the transport holds still while it runs down.
+    count_in_remaining: u64,
+    /// Input was captured in the last block (reported in transport events).
+    capturing: bool,
+    capture: Producer<CaptureChunk>,
 
     master_gain: f32,
     master_current: f32,
@@ -231,6 +303,7 @@ impl Engine {
         let (evt_tx, evt_rx) = RingBuffer::new(EVENT_QUEUE_CAPACITY);
         // Every source slot can be released at most once per refill, so this rarely fills.
         let (gc_tx, gc_rx) = RingBuffer::new(MAX_SOURCES * 2);
+        let (cap_tx, cap_rx) = RingBuffer::new(CAPTURE_QUEUE_CAPACITY);
         let engine = Engine {
             sample_rate,
             messages: msg_rx,
@@ -244,6 +317,9 @@ impl Engine {
             track_buf: vec![0.0; MAX_TRACKS * 2 * BLOCK_FRAMES],
             master_l: vec![0.0; BLOCK_FRAMES],
             master_r: vec![0.0; BLOCK_FRAMES],
+            transport_ramp: vec![0.0; BLOCK_FRAMES],
+            metronome_l: vec![0.0; BLOCK_FRAMES],
+            metronome_r: vec![0.0; BLOCK_FRAMES],
             playing: false,
             transport_gain: 0.0,
             position: 0,
@@ -252,6 +328,14 @@ impl Engine {
             loop_end: 0,
             tempo: DEFAULT_TEMPO,
             metronome: Metronome::new(sample_rate),
+            record_enabled: false,
+            punch_enabled: false,
+            punch_start: 0,
+            punch_end: 0,
+            count_in_frames: 0,
+            count_in_remaining: 0,
+            capturing: false,
+            capture: cap_tx,
             master_gain: 1.0,
             master_current: 1.0,
             master_meter: MeterAcc::default(),
@@ -265,6 +349,7 @@ impl Engine {
                 messages: msg_tx,
                 events: evt_rx,
                 garbage: gc_rx,
+                capture: Some(cap_rx),
             },
         )
     }
@@ -281,12 +366,25 @@ impl Engine {
         self.playing
     }
 
-    /// Renders interleaved audio into `out` with `channels` channels. Real-time safe.
+    /// Renders interleaved audio into `out` with `channels` channels, with no input.
+    /// Real-time safe. See [`Engine::process_io`].
+    pub fn process(&mut self, out: &mut [f32], channels: usize) {
+        self.process_io(&[], 0, out, channels);
+    }
+
+    /// Renders interleaved audio into `out` while consuming interleaved `input` (the same
+    /// number of frames, `in_channels` wide; a shorter input reads as silence). Real-time safe.
     ///
     /// Channel 0 is left and 1 is right; a mono output gets the average of both, extra
     /// channels are silent. A trailing partial frame is zeroed, as is the whole buffer
     /// when `channels == 0`.
-    pub fn process(&mut self, out: &mut [f32], channels: usize) {
+    pub fn process_io(
+        &mut self,
+        input: &[f32],
+        in_channels: usize,
+        out: &mut [f32],
+        channels: usize,
+    ) {
         while let Ok(message) = self.messages.pop() {
             match message {
                 Message::Command(command) => self.apply(command),
@@ -302,12 +400,20 @@ impl Engine {
         let mut done = 0;
         while done < frames {
             let mut n = (frames - done).min(BLOCK_FRAMES);
-            let looping = self.loop_active();
-            if looping {
+            let counting_in = self.playing && self.count_in_remaining > 0;
+            let looping = !counting_in && self.loop_active();
+            if counting_in {
+                n = n.min(self.count_in_remaining as usize);
+            } else if looping {
                 n = n.min((self.loop_end - self.position) as usize);
             }
+            let block_input = match in_channels {
+                0 => &[][..],
+                ch => input.get(done * ch..(done + n) * ch).unwrap_or(&[]),
+            };
 
-            self.render_block(n);
+            self.render_block(n, block_input, in_channels, counting_in);
+            self.capture_block(n, block_input, in_channels, counting_in);
 
             for (i, frame) in out[done * channels..(done + n) * channels]
                 .chunks_exact_mut(channels)
@@ -325,7 +431,9 @@ impl Engine {
                 }
             }
 
-            if self.running() {
+            if counting_in {
+                self.count_in_remaining -= n as u64;
+            } else if self.running() {
                 self.position = self.position.saturating_add(n as u64);
                 if looping && self.position >= self.loop_end {
                     self.position = self.loop_start;
@@ -352,12 +460,67 @@ impl Engine {
             && self.position < self.loop_end
     }
 
-    fn render_block(&mut self, n: usize) {
-        let running = self.running();
+    /// Copies armed tracks' input into capture chunks, for the part of the block inside the
+    /// punch range (when punch is on). Real-time safe: chunks live on the stack.
+    fn capture_block(&mut self, n: usize, input: &[f32], in_channels: usize, counting_in: bool) {
+        self.capturing = false;
+        if !(self.playing && self.record_enabled) || counting_in {
+            return;
+        }
+        let block_start = self.position;
+        let block_end = block_start.saturating_add(n as u64);
+        let (from, to) = if self.punch_enabled {
+            (
+                block_start.max(self.punch_start),
+                block_end.min(self.punch_end),
+            )
+        } else {
+            (block_start, block_end)
+        };
+        if from >= to {
+            return;
+        }
+        self.capturing = true;
+        let first = (from - block_start) as usize;
+        let frames = (to - from) as usize;
+        for track in self.tracks.iter_mut().flatten().filter(|t| t.armed) {
+            let channels = if track.input_stereo { 2 } else { 1 };
+            let mut chunk = CaptureChunk {
+                track: track.id,
+                start: from,
+                frames: frames as u32,
+                channels: channels as u32,
+                data: [0.0; 2 * CAPTURE_CHUNK_FRAMES],
+            };
+            for i in 0..frames {
+                let (l, r) = track.input_frame(input, in_channels, first + i);
+                chunk.data[i * channels] = l;
+                if channels == 2 {
+                    chunk.data[i * 2 + 1] = r;
+                }
+            }
+            if self.capture.push(chunk).is_err() {
+                track.overrun = true;
+            }
+        }
+    }
+
+    fn render_block(&mut self, n: usize, input: &[f32], in_channels: usize, counting_in: bool) {
+        let running = self.running() && !counting_in;
         let master_l = &mut self.master_l[..n];
         let master_r = &mut self.master_r[..n];
         master_l.fill(0.0);
         master_r.fill(0.0);
+
+        // The stop fade, per frame. It scales playback (clips, metronome) but not monitored
+        // input, so you can hear yourself while the transport is stopped.
+        let k = self.smoothing;
+        let transport_target = if self.playing { 1.0 } else { 0.0 };
+        let ramp = &mut self.transport_ramp[..n];
+        for g in ramp.iter_mut() {
+            self.transport_gain += (transport_target - self.transport_gain) * k;
+            *g = self.transport_gain;
+        }
 
         // Clips → per-track buffers.
         for (slot, track) in self.tracks.iter().enumerate() {
@@ -395,16 +558,34 @@ impl Engine {
                     else {
                         break;
                     };
-                    let g = clip.fade_gain(rel);
                     let i = (t - block_start) as usize;
+                    let g = clip.fade_gain(rel) * ramp[i];
                     buf_l[i] += left[src] * g;
                     buf_r[i] += right[src] * g;
                 }
             }
         }
 
+        // Input → meters, and into the track when monitoring.
+        for (slot, track) in self.tracks.iter_mut().enumerate() {
+            let Some(track) = track else { continue };
+            if !(track.armed || track.monitor) {
+                continue;
+            }
+            let base = slot * 2 * BLOCK_FRAMES;
+            let (buf_l, buf_r) =
+                self.track_buf[base..base + 2 * BLOCK_FRAMES].split_at_mut(BLOCK_FRAMES);
+            for i in 0..n {
+                let (l, r) = track.input_frame(input, in_channels, i);
+                track.input_meter.add(l, r);
+                if track.monitor {
+                    buf_l[i] += l;
+                    buf_r[i] += r;
+                }
+            }
+        }
+
         // Tracks → master.
-        let k = self.smoothing;
         for (slot, track) in self.tracks.iter_mut().enumerate() {
             let Some(track) = track else { continue };
             let (target_l, target_r) = track.targets(self.any_solo);
@@ -426,24 +607,40 @@ impl Engine {
             }
         }
 
-        if running {
+        let metronome_l = &mut self.metronome_l[..n];
+        let metronome_r = &mut self.metronome_r[..n];
+        metronome_l.fill(0.0);
+        metronome_r.fill(0.0);
+        if counting_in {
+            // Count-in clicks on every beat from the start of the pre-roll, whether or not the
+            // metronome is on, so the last click lands exactly one beat before recording.
+            let elapsed = self.count_in_frames.saturating_sub(self.count_in_remaining);
+            let enabled = self.metronome.enabled;
+            self.metronome.enabled = true;
+            self.metronome.render(
+                elapsed,
+                self.tempo,
+                self.sample_rate,
+                metronome_l,
+                metronome_r,
+            );
+            self.metronome.enabled = enabled;
+        } else if running {
             self.metronome.render(
                 self.position,
                 self.tempo,
                 self.sample_rate,
-                master_l,
-                master_r,
+                metronome_l,
+                metronome_r,
             );
         }
 
-        // Master gain and the stop fade.
-        let transport_target = if self.playing { 1.0 } else { 0.0 };
+        // Metronome (faded with the transport) and master gain.
         for i in 0..n {
             self.master_current += (self.master_gain - self.master_current) * k;
-            self.transport_gain += (transport_target - self.transport_gain) * k;
-            let g = self.master_current * self.transport_gain;
-            master_l[i] *= g;
-            master_r[i] *= g;
+            let g = self.master_current;
+            master_l[i] = (master_l[i] + metronome_l[i] * ramp[i]) * g;
+            master_r[i] = (master_r[i] + metronome_r[i] * ramp[i]) * g;
             self.master_meter.add(master_l[i], master_r[i]);
         }
     }
@@ -459,6 +656,8 @@ impl Engine {
         let _ = self.events.push(Event::Transport {
             playing: self.playing,
             position: self.position,
+            recording: self.capturing,
+            counting_in: self.playing && self.count_in_remaining > 0,
         });
         let (peak_l, peak_r, rms_l, rms_r) = self.master_meter.take();
         let _ = self.events.push(Event::MasterMeter {
@@ -476,17 +675,70 @@ impl Engine {
                 rms_l,
                 rms_r,
             });
+            if track.armed || track.monitor {
+                let (peak_l, peak_r, _, _) = track.input_meter.take();
+                let _ = self.events.push(Event::InputMeter {
+                    track: track.id,
+                    peak_l,
+                    peak_r,
+                });
+            }
+            if track.overrun {
+                track.overrun = false;
+                let _ = self.events.push(Event::CaptureOverrun { track: track.id });
+            }
         }
     }
 
     fn apply(&mut self, command: Command) {
         match command {
             Command::Play => {
+                if !self.playing && self.record_enabled {
+                    self.count_in_remaining = self.count_in_frames;
+                }
                 self.playing = true;
                 // Start at full level: clip fades handle clicks, and offline renders null.
                 self.transport_gain = 1.0;
             }
-            Command::Stop => self.playing = false,
+            Command::Stop => {
+                self.playing = false;
+                self.count_in_remaining = 0;
+            }
+            Command::SetTrackArm { track, armed } => {
+                if let Some(t) = self.track_mut(track) {
+                    t.armed = armed;
+                }
+            }
+            Command::SetTrackInput {
+                track,
+                channel,
+                stereo,
+            } => {
+                if let Some(t) = self.track_mut(track) {
+                    t.input_channel = channel as usize;
+                    t.input_stereo = stereo;
+                }
+            }
+            Command::SetTrackMonitor { track, monitor } => {
+                if let Some(t) = self.track_mut(track) {
+                    t.monitor = monitor;
+                }
+            }
+            Command::SetRecord { enabled } => self.record_enabled = enabled,
+            Command::SetPunch {
+                enabled,
+                start,
+                end,
+            } => {
+                self.punch_enabled = enabled;
+                self.punch_start = start;
+                self.punch_end = end;
+            }
+            Command::SetCountIn { frames } => {
+                self.count_in_frames = frames;
+                // A shorter count-in sent mid-count-in can't leave more pre-roll than it allows.
+                self.count_in_remaining = self.count_in_remaining.min(frames);
+            }
             Command::Seek { frame } => self.position = frame,
             Command::SetLoop {
                 enabled,

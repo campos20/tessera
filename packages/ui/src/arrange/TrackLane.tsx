@@ -1,7 +1,8 @@
 import type { Peaks, Track } from "@tessera/schema";
 import { type PointerEventHandler, useRef } from "react";
 import { useCanvas } from "../hooks/useCanvas";
-import { drawLane } from "./drawLane";
+import type { LiveTake } from "../state/session";
+import { drawLane, drawLiveTake } from "./drawLane";
 import type { GridLine, View } from "./timeScale";
 
 export interface TrackLaneProps {
@@ -14,6 +15,8 @@ export interface TrackLaneProps {
   selected: ReadonlySet<number>;
   loop: { enabled: boolean; start: number; end: number };
   alternate: boolean;
+  /** The take being recorded on this track, if any. */
+  live: LiveTake | undefined;
   onPointerDown: PointerEventHandler<HTMLCanvasElement>;
   onPointerMove: PointerEventHandler<HTMLCanvasElement>;
   onPointerUp: PointerEventHandler<HTMLCanvasElement>;
@@ -36,10 +39,11 @@ export function TrackLane(p: TrackLaneProps) {
       ctx.fillStyle = p.alternate ? "#1d1d20" : "#1b1b1e";
       ctx.fillRect(0, 0, w, h);
       drawLane(ctx, w, h, { ...p, style: STYLE });
+      if (p.live) drawLiveTake(ctx, p.live, p.view, h);
       ctx.fillStyle = "#2a2a2e";
       ctx.fillRect(0, h - 1, w, 1);
     },
-    [p.track, p.view, p.grid, p.peaks, p.selected, p.loop, p.alternate],
+    [p.track, p.view, p.grid, p.peaks, p.selected, p.loop, p.alternate, p.live],
   );
   return (
     <canvas

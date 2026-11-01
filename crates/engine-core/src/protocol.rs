@@ -158,15 +158,32 @@ protocol! {
         RemoveClip { clip: u32 } = 14,
         /// Releases a source's audio. Clips that use it go silent.
         RemoveSource { source: u32 } = 15,
+        /// Armed tracks capture their input while recording.
+        SetTrackArm { track: u32, armed: bool } = 16,
+        /// Input channel (0-based) the track listens to; `stereo` takes `channel` and `channel + 1`.
+        SetTrackInput { track: u32, channel: u32, stereo: bool } = 17,
+        /// Plays the track's input through the track (software monitoring).
+        SetTrackMonitor { track: u32, monitor: bool } = 18,
+        /// While enabled and playing, armed tracks are captured.
+        SetRecord { enabled: bool } = 19,
+        /// When enabled, capture only happens inside `[start, end)`.
+        SetPunch { enabled: bool, start: u64, end: u64 } = 20,
+        /// Metronome-only pre-roll before recording starts (0 = none).
+        SetCountIn { frames: u64 } = 21,
     }
 }
 
 protocol! {
     /// Engine → UI. Meter values are linear amplitudes over the last meter interval (~33 ms).
     pub enum Event {
-        Transport { playing: bool, position: u64 } = 0,
+        /// `recording`: input is being captured right now; `counting_in`: in the count-in pre-roll.
+        Transport { playing: bool, position: u64, recording: bool, counting_in: bool } = 0,
         TrackMeter { track: u32, peak_l: f32, peak_r: f32, rms_l: f32, rms_r: f32 } = 1,
         MasterMeter { peak_l: f32, peak_r: f32, rms_l: f32, rms_r: f32 } = 2,
+        /// Input level of an armed or monitored track (before track gain).
+        InputMeter { track: u32, peak_l: f32, peak_r: f32 } = 3,
+        /// Captured audio was dropped because the capture queue was full.
+        CaptureOverrun { track: u32 } = 4,
     }
 }
 
@@ -224,6 +241,26 @@ mod tests {
             },
             Command::RemoveClip { clip: 7 },
             Command::RemoveSource { source: 8 },
+            Command::SetTrackArm {
+                track: 1,
+                armed: true,
+            },
+            Command::SetTrackInput {
+                track: 1,
+                channel: 3,
+                stereo: true,
+            },
+            Command::SetTrackMonitor {
+                track: 1,
+                monitor: true,
+            },
+            Command::SetRecord { enabled: true },
+            Command::SetPunch {
+                enabled: true,
+                start: 10,
+                end: 20,
+            },
+            Command::SetCountIn { frames: 96_000 },
         ]
     }
 
@@ -325,11 +362,13 @@ mod tests {
         let event = serde_json::to_string(&Event::Transport {
             playing: true,
             position: 48_000,
+            recording: false,
+            counting_in: false,
         })
         .unwrap();
         assert_eq!(
             event,
-            r#"{"type":"Transport","playing":true,"position":48000}"#
+            r#"{"type":"Transport","playing":true,"position":48000,"recording":false,"countingIn":false}"#
         );
     }
 

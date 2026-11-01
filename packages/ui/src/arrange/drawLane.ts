@@ -201,3 +201,48 @@ function lighten(hex: string): string {
   const mix = (c: number) => Math.round(c + (255 - c) * 0.45);
   return `#${[(n >> 16) & 255, (n >> 8) & 255, n & 255].map((c) => mix(c).toString(16).padStart(2, "0")).join("")}`;
 }
+
+const RECORD_COLOR = "#ff453a";
+
+/** A take being recorded: a red clip that grows, with its waveform so far. */
+export function drawLiveTake(
+  ctx: CanvasRenderingContext2D,
+  take: { start: number; frames: number; framesPerPeak: number; peaks: number[] },
+  view: View,
+  laneHeight: number,
+) {
+  const x0 = frameToX(take.start, view);
+  const w = Math.max(2, take.frames / view.framesPerPx);
+  const top = 2;
+  const h = laneHeight - 4;
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(x0 + 0.5, top + 0.5, w - 1, h - 1, 4);
+  ctx.fillStyle = withAlpha(RECORD_COLOR, 0.22);
+  ctx.fill();
+  ctx.clip();
+  ctx.fillStyle = withAlpha(RECORD_COLOR, 0.85);
+  ctx.fillRect(x0, top, w, CLIP_HEADER);
+  ctx.fillStyle = "rgba(0,0,0,0.85)";
+  ctx.font = "600 11px system-ui, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.fillText("● Recording", Math.max(x0, 0) + 6, top + CLIP_HEADER / 2 + 0.5);
+  const mid = top + CLIP_HEADER + (h - CLIP_HEADER) / 2;
+  const half = (h - CLIP_HEADER) / 2 - 1;
+  ctx.fillStyle = "#ffb3ae";
+  const pairs = take.peaks.length / 2;
+  const pxPerPeak = take.framesPerPeak / view.framesPerPx;
+  for (let i = 0; i < pairs; i++) {
+    const max = take.peaks[2 * i + 1]!;
+    const min = take.peaks[2 * i]!;
+    ctx.fillRect(
+      x0 + i * pxPerPeak,
+      mid - max * half,
+      Math.max(1, pxPerPeak),
+      Math.max(1, (max - min) * half),
+    );
+  }
+  ctx.restore();
+  ctx.strokeStyle = RECORD_COLOR;
+  ctx.strokeRect(x0 + 0.5, top + 0.5, w - 1, h - 1);
+}

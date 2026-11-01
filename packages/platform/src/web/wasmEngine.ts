@@ -5,7 +5,11 @@ export interface EngineExports {
   tessera_destroy(handle: number): void;
   tessera_command_args(handle: number): number;
   tessera_command(handle: number, op: number): number;
-  tessera_process(handle: number, frames: number): number;
+  tessera_input(handle: number, channel: number): number;
+  tessera_process(handle: number, frames: number, inChannels: number): number;
+  tessera_capture_info(handle: number): number;
+  tessera_capture_data(handle: number): number;
+  tessera_poll_capture(handle: number): number;
   tessera_output(handle: number, channel: number): number;
   tessera_event_args(handle: number): number;
   tessera_poll_event(handle: number): number;

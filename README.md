@@ -10,8 +10,8 @@ pitch-alignment software. It is built from one codebase in two editions:
 All DSP lives in Rust crates that compile to both WebAssembly and native code. See
 [AGENTS.md](AGENTS.md) for the architecture, conventions and roadmap.
 
-**Status:** M2 (arrange view with clip editing, undo/redo, projects with autosave and `.tessera`
-import/export) on top of the M1 engine.
+**Status:** M3 in progress: recording (arm, input selection, monitoring, count-in, punch),
+device settings and latency calibration, on top of the M2 arrange view and projects.
 
 ## Using it
 
@@ -20,6 +20,13 @@ import/export) on top of the M1 engine.
 - **Edit clips:** drag to move (also across tracks), drag the edges to trim, drag the small handles
   at the top corners for fades, Alt-drag vertically for clip gain. Edits snap to the visible grid;
   hold ⌘/Ctrl while dragging to bypass.
+- **Record:** arm a track (●), choose its input in the track's ⋯ menu, then press Record (R).
+  The ▾ next to Record sets the count-in and punch (record only inside the loop region). Takes
+  become clips, compensated for the round-trip latency.
+- **Devices and latency:** ⚙ opens the audio settings. Calibrate with a cable from an output to
+  an input: Tessera plays its metronome, records it back and measures the delay. On desktop,
+  `cargo run --release -p engine-native --example soak -- --buffer 128 --minutes 10 --input default`
+  checks for dropouts.
 - **Projects** save automatically. The project name menu (top left) creates, renames, opens,
   deletes, exports and imports projects (`.tessera` files carry the project and its audio).
 
@@ -76,7 +83,7 @@ For example: `pnpm --filter @tessera/desktop tauri dev --features asio`.
 ```
 crates/engine-core     platform-agnostic engine (DSP, command/event protocol); no I/O, no threads
 crates/engine-wasm     raw C-ABI WASM build of engine-core, run inside the AudioWorklet
-crates/engine-native   cpal output stream, device enumeration, file import (desktop)
+crates/engine-native   cpal input/output, device settings, take recorder, file import (desktop)
 crates/media           decoding (WAV, FLAC, MP3, OGG Vorbis, AAC/M4A), resampling, waveform peaks
 crates/worker-wasm     raw C-ABI WASM for the web worker: decoding, project loading, archives
 crates/tune            Tune pitch editor DSP (M4)

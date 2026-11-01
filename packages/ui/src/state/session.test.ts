@@ -15,15 +15,30 @@ function fakePlatform(engineRate: number, saved: Project) {
     writeFile: async () => {},
     readFile: async (_id, path) => new File([new Uint8Array(4)], path),
     delete: async () => {},
+    deleteFile: async () => {},
     exportArchive: async () => true,
     importArchive: async () => saved,
   };
   let nextSource = 100;
   const platform: AudioPlatform = {
     edition: "web",
-    capabilities: { plugins: false, outputDeviceSelection: false, midi: false },
+    capabilities: {
+      plugins: false,
+      outputDeviceSelection: false,
+      midi: false,
+      settings: { host: false, outputDevice: false, inputDevice: true, sampleRate: false, bufferSize: false },
+    },
     storage,
-    start: async () => ({ sampleRate: engineRate }),
+    start: async () => ({ sampleRate: engineRate, inputChannels: 0, latencyEstimate: 0 }),
+    configureAudio: async () => ({
+      info: { sampleRate: engineRate, inputChannels: 1, latencyEstimate: 0 },
+      restarted: false,
+    }),
+    beginRecording: async () => {},
+    endRecording: async () => [],
+    onRecordingProgress: () => () => {},
+    onXruns: () => () => {},
+    measureLatency: async () => null,
     send: (c) => void sent.push(c),
     onEvent: () => () => {},
     // One second of audio, reported (like the real platforms) at the engine rate.

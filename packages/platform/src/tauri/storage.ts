@@ -28,6 +28,10 @@ export class TauriStorage implements ProjectStorage {
     return new File([bytes], path.split("/").at(-1) ?? path);
   }
 
+  deleteFile(projectId: string, path: string): Promise<void> {
+    return invoke("project_delete_file", { id: projectId, path });
+  }
+
   delete(projectId: string): Promise<void> {
     return invoke("project_delete", { id: projectId });
   }

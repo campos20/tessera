@@ -8,6 +8,7 @@
 //! no locks, no I/O, no logging, no panics.
 
 mod buffer;
+pub mod calibration;
 mod engine;
 mod metronome;
 pub mod offline;
@@ -16,8 +17,8 @@ mod protocol;
 
 pub use buffer::AudioBuffer;
 pub use engine::{
-    BLOCK_FRAMES, EVENT_QUEUE_CAPACITY, Engine, EngineController, MAX_CLIPS, MAX_SOURCES,
-    MAX_TRACKS, MESSAGE_QUEUE_CAPACITY,
+    BLOCK_FRAMES, CAPTURE_CHUNK_FRAMES, CAPTURE_QUEUE_CAPACITY, CaptureChunk, EVENT_QUEUE_CAPACITY,
+    Engine, EngineController, MAX_CLIPS, MAX_SOURCES, MAX_TRACKS, MESSAGE_QUEUE_CAPACITY,
 };
 pub use osc::SineOsc;
 pub use protocol::{Arg, Command, Event, LayoutEntry, MAX_ARGS, RawMessage};

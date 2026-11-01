@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 engine-core = { path = "../engine-core" }
+rtrb = "0.4.1"
 
 [lints]
 workspace = true

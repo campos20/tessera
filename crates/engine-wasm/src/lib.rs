@@ -13,7 +13,10 @@
 
 use std::sync::Arc;
 
-use engine_core::{AudioBuffer, Engine, EngineController, MAX_ARGS, RawMessage};
+use engine_core::{
+    AudioBuffer, CAPTURE_CHUNK_FRAMES, CaptureChunk, Engine, EngineController, MAX_ARGS, RawMessage,
+};
+use rtrb::Consumer;
 
 /// Largest block [`tessera_process`] renders in one call. AudioWorklet blocks are 128 frames.
 pub const MAX_FRAMES: usize = 4096;
@@ -21,6 +24,14 @@ pub const MAX_FRAMES: usize = 4096;
 pub struct Handle {
     engine: Engine,
     controller: EngineController,
+    capture: Consumer<CaptureChunk>,
+    /// Planar input written by JS before [`tessera_process`].
+    in_l: Vec<f32>,
+    in_r: Vec<f32>,
+    input: Vec<f32>,
+    /// `[track, start, frames, channels]` of the chunk returned by [`tessera_poll_capture`].
+    capture_info: [f64; 4],
+    capture_data: [f32; 2 * CAPTURE_CHUNK_FRAMES],
     interleaved: Vec<f32>,
     out_l: Vec<f32>,
     out_r: Vec<f32>,
@@ -41,10 +52,19 @@ pub extern "C" fn tessera_create(sample_rate: f32) -> *mut Handle {
     if !(sample_rate.is_finite() && sample_rate > 0.0) {
         return core::ptr::null_mut();
     }
-    let (engine, controller) = Engine::new(sample_rate);
+    let (engine, mut controller) = Engine::new(sample_rate);
+    let Some(capture) = controller.take_capture() else {
+        return core::ptr::null_mut();
+    };
     let handle = Handle {
         engine,
         controller,
+        capture,
+        in_l: vec![0.0; MAX_FRAMES],
+        in_r: vec![0.0; MAX_FRAMES],
+        input: vec![0.0; MAX_FRAMES * 2],
+        capture_info: [0.0; 4],
+        capture_data: [0.0; 2 * CAPTURE_CHUNK_FRAMES],
         interleaved: vec![0.0; MAX_FRAMES * 2],
         out_l: vec![0.0; MAX_FRAMES],
         out_r: vec![0.0; MAX_FRAMES],
@@ -94,20 +114,54 @@ pub unsafe extern "C" fn tessera_command(handle: *mut Handle, op: u32) -> u32 {
     }
 }
 
-/// Renders `frames` stereo frames (clamped to [`MAX_FRAMES`]) into the buffers returned by
-/// [`tessera_output`]. Returns the number of frames rendered.
+/// Planar input buffer for channel 0 (left) or 1 (right), [`MAX_FRAMES`] long. JS writes the
+/// block's input here before [`tessera_process`].
 ///
 /// # Safety
 /// `handle` must be null or a live pointer from [`tessera_create`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tessera_process(handle: *mut Handle, frames: u32) -> u32 {
+pub unsafe extern "C" fn tessera_input(handle: *mut Handle, channel: u32) -> *mut f32 {
+    // SAFETY: caller guarantees `handle` is null or live.
+    match (unsafe { handle.as_mut() }, channel) {
+        (Some(h), 0) => h.in_l.as_mut_ptr(),
+        (Some(h), 1) => h.in_r.as_mut_ptr(),
+        _ => core::ptr::null_mut(),
+    }
+}
+
+/// Renders `frames` stereo frames (clamped to [`MAX_FRAMES`]) into the buffers returned by
+/// [`tessera_output`], consuming `in_channels` (0–2) channels from [`tessera_input`].
+/// Returns the number of frames rendered.
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`tessera_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tessera_process(
+    handle: *mut Handle,
+    frames: u32,
+    in_channels: u32,
+) -> u32 {
     // SAFETY: caller guarantees `handle` is null or live.
     let Some(h) = (unsafe { handle.as_mut() }) else {
         return 0;
     };
     let frames = (frames as usize).min(MAX_FRAMES);
+    let in_channels = (in_channels as usize).min(2);
+    for i in 0..frames * in_channels {
+        let (frame, ch) = (i / in_channels, i % in_channels);
+        h.input[i] = if ch == 0 {
+            h.in_l[frame]
+        } else {
+            h.in_r[frame]
+        };
+    }
     let interleaved = &mut h.interleaved[..frames * 2];
-    h.engine.process(interleaved, 2);
+    h.engine.process_io(
+        &h.input[..frames * in_channels],
+        in_channels,
+        interleaved,
+        2,
+    );
     for (i, frame) in interleaved.as_chunks::<2>().0.iter().enumerate() {
         h.out_l[i] = frame[0];
         h.out_r[i] = frame[1];
@@ -157,6 +211,52 @@ pub unsafe extern "C" fn tessera_poll_event(handle: *mut Handle) -> i32 {
             raw.op as i32
         }
         None => -1,
+    }
+}
+
+/// Where [`tessera_poll_capture`] writes the chunk's `[track, start, frames, channels]`.
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`tessera_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tessera_capture_info(handle: *const Handle) -> *const f64 {
+    // SAFETY: caller guarantees `handle` is null or live.
+    unsafe { handle.as_ref() }.map_or(core::ptr::null(), |h| h.capture_info.as_ptr())
+}
+
+/// Where [`tessera_poll_capture`] writes the chunk's interleaved samples.
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`tessera_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tessera_capture_data(handle: *const Handle) -> *const f32 {
+    // SAFETY: caller guarantees `handle` is null or live.
+    unsafe { handle.as_ref() }.map_or(core::ptr::null(), |h| h.capture_data.as_ptr())
+}
+
+/// Pops the next captured-input chunk into [`tessera_capture_info`]/[`tessera_capture_data`].
+/// Returns 1, or 0 when there is none. Allocation-free (callable from `process()`).
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`tessera_create`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tessera_poll_capture(handle: *mut Handle) -> u32 {
+    // SAFETY: caller guarantees `handle` is null or live.
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return 0;
+    };
+    match h.capture.pop() {
+        Ok(chunk) => {
+            h.capture_info = [
+                f64::from(chunk.track),
+                chunk.start as f64,
+                f64::from(chunk.frames),
+                f64::from(chunk.channels),
+            ];
+            h.capture_data = chunk.data;
+            1
+        }
+        Err(_) => 0,
     }
 }
 
@@ -279,14 +379,14 @@ mod tests {
             assert_eq!(send(h, Command::Play), 1);
             assert_eq!(tessera_command(h, 999), 0);
 
-            assert_eq!(tessera_process(h, 128), 128);
+            assert_eq!(tessera_process(h, 128, 0), 128);
             let l = core::slice::from_raw_parts(tessera_output(h, 0), 128);
             let r = core::slice::from_raw_parts(tessera_output(h, 1), 128);
             assert!(l.iter().all(|&s| s == 0.5) && r.iter().all(|&s| s == -0.25));
             assert!(tessera_output(h, 2).is_null());
 
             for _ in 0..20 {
-                tessera_process(h, 128);
+                tessera_process(h, 128, 0);
             }
             let mut saw_transport = false;
             loop {
@@ -306,12 +406,45 @@ mod tests {
             assert!(saw_transport);
 
             assert_eq!(send(h, Command::RemoveSource { source: 7 }), 1);
-            tessera_process(h, 128);
+            tessera_process(h, 128, 0);
             assert_eq!(tessera_collect_garbage(h), 1);
-            assert_eq!(tessera_process(h, 1_000_000), MAX_FRAMES as u32);
+            assert_eq!(tessera_process(h, 1_000_000, 0), MAX_FRAMES as u32);
             tessera_destroy(h);
-            assert_eq!(tessera_process(core::ptr::null_mut(), 128), 0);
+            assert_eq!(tessera_process(core::ptr::null_mut(), 128, 0), 0);
             tessera_source_discard(tessera_source_create(1, 10));
+        }
+    }
+
+    #[test]
+    fn records_planar_input_through_the_abi() {
+        let h = tessera_create(48_000.0);
+        unsafe {
+            for c in [
+                Command::AddTrack { track: 3 },
+                Command::SetTrackArm {
+                    track: 3,
+                    armed: true,
+                },
+                Command::SetTrackInput {
+                    track: 3,
+                    channel: 0,
+                    stereo: true,
+                },
+                Command::SetRecord { enabled: true },
+                Command::Play,
+            ] {
+                assert_eq!(send(h, c), 1);
+            }
+            core::slice::from_raw_parts_mut(tessera_input(h, 0), 128).fill(0.25);
+            core::slice::from_raw_parts_mut(tessera_input(h, 1), 128).fill(-0.5);
+            tessera_process(h, 128, 2);
+            assert_eq!(tessera_poll_capture(h), 1);
+            let info = core::slice::from_raw_parts(tessera_capture_info(h), 4);
+            assert_eq!(info, &[3.0, 0.0, 128.0, 2.0]);
+            let data = core::slice::from_raw_parts(tessera_capture_data(h), 4);
+            assert_eq!(data, &[0.25, -0.5, 0.25, -0.5]);
+            assert_eq!(tessera_poll_capture(h), 0);
+            tessera_destroy(h);
         }
     }
 }

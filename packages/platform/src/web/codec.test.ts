@@ -33,10 +33,12 @@ describe("encodeCommand", () => {
 
 describe("decodeEvent", () => {
   it("rebuilds events with typed fields", () => {
-    expect(decodeEvent(EventLayout.Transport.op, [1, 48_000])).toEqual({
+    expect(decodeEvent(EventLayout.Transport.op, [1, 48_000, 0, 1])).toEqual({
       type: "Transport",
       playing: true,
       position: 48_000,
+      recording: false,
+      countingIn: true,
     });
     expect(decodeEvent(EventLayout.TrackMeter.op, [3, 0.5, 0.25, 0.1, 0.05])).toEqual({
       type: "TrackMeter",

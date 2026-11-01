@@ -1,12 +1,22 @@
-import { type AudioDeviceList, type Command, MAX_ARGS, type SourceInfo } from "@tessera/schema";
+import {
+  type AudioDeviceList,
+  type Command,
+  MAX_ARGS,
+  type SourceInfo,
+  type TakeProgress,
+} from "@tessera/schema";
 import type {
   AudioPlatform,
+  AudioSettings,
   Diagnostics,
   EngineEventListener,
   EngineInfo,
+  LatencyMeasurement,
   PlatformCapabilities,
   ProjectStorage,
+  RecordedTake,
 } from "../index";
+import { CaptureRing } from "./captureRing";
 import { decodeEvent, encodeCommand } from "./codec";
 import { MessageRing } from "./messageRing";
 import {
@@ -35,8 +45,15 @@ export class WebPlatform implements AudioPlatform {
   readonly edition = "web";
   readonly capabilities: PlatformCapabilities = {
     plugins: false,
-    outputDeviceSelection: typeof AudioContext !== "undefined" && "setSinkId" in AudioContext.prototype,
+    outputDeviceSelection: canSetSink(),
     midi: typeof navigator !== "undefined" && "requestMIDIAccess" in navigator,
+    settings: {
+      host: false,
+      outputDevice: canSetSink(),
+      inputDevice: true,
+      sampleRate: false,
+      bufferSize: false,
+    },
   };
 
   private ctx: AudioContext | undefined;
@@ -53,12 +70,86 @@ export class WebPlatform implements AudioPlatform {
   private readonly workletRequests = new Map<number, Pending<void>>();
   private readonly worker = new WorkerClient();
   private nextSourceId = 1;
+  private input: { stream: MediaStream; source: MediaStreamAudioSourceNode } | undefined;
+  private readonly progressListeners = new Set<(p: TakeProgress) => void>();
   readonly storage: ProjectStorage = new OpfsStorage(this.worker);
 
   async start(): Promise<EngineInfo> {
     await this.init();
     await this.ctx!.resume();
-    return { sampleRate: this.ctx!.sampleRate };
+    return this.engineInfo();
+  }
+
+  async configureAudio(settings: AudioSettings): Promise<{ info: EngineInfo; restarted: boolean }> {
+    await this.init();
+    const ctx = this.ctx!;
+    if (this.capabilities.settings.outputDevice) {
+      const sinkId =
+        !settings.outputDevice || settings.outputDevice === "default" ? "" : settings.outputDevice;
+      await (ctx as AudioContext & { setSinkId(id: string): Promise<void> }).setSinkId(sinkId);
+    }
+    this.input?.source.disconnect();
+    this.input?.stream.getTracks().forEach((t) => t.stop());
+    this.input = undefined;
+    if (settings.inputDevice) {
+      // Raw input: browser voice processing would color and delay the recording.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: settings.inputDevice === "default" ? undefined : { exact: settings.inputDevice },
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: { ideal: 2 },
+        },
+      });
+      const source = ctx.createMediaStreamSource(stream);
+      source.connect(this.node!);
+      this.input = { stream, source };
+    }
+    return { info: this.engineInfo(), restarted: false };
+  }
+
+  async beginRecording(projectId: string): Promise<void> {
+    await this.init();
+    await this.worker.call({
+      kind: "recordStart",
+      projectId,
+      prefix: `rec-${crypto.randomUUID().slice(0, 8)}`,
+      sampleRate: this.ctx!.sampleRate,
+    });
+  }
+
+  endRecording(): Promise<RecordedTake[]> {
+    return this.worker.call({ kind: "recordStop" });
+  }
+
+  onRecordingProgress(listener: (progress: TakeProgress) => void): () => void {
+    this.progressListeners.add(listener);
+    return () => this.progressListeners.delete(listener);
+  }
+
+  /** Browsers don't report dropouts. */
+  onXruns(): () => void {
+    return () => {};
+  }
+
+  measureLatency(projectId: string, path: string, bpm: number): Promise<LatencyMeasurement | null> {
+    return this.worker.call({ kind: "measureLatency", projectId, path, bpm });
+  }
+
+  private engineInfo(): EngineInfo {
+    const ctx = this.ctx!;
+    const settings = this.input?.stream.getAudioTracks()[0]?.getSettings() as
+      (MediaTrackSettings & { latency?: number }) | undefined;
+    const inputLatency = settings?.latency ?? 0.01;
+    return {
+      sampleRate: ctx.sampleRate,
+      inputChannels: this.input ? Math.min(2, settings?.channelCount ?? 1) : 0,
+      latencyEstimate: Math.round(
+        (ctx.baseLatency + (ctx.outputLatency || 0) + inputLatency) * ctx.sampleRate,
+      ),
+      bufferSize: 128,
+    };
   }
 
   send(command: Command): void {
@@ -124,7 +215,7 @@ export class WebPlatform implements AudioPlatform {
           isDefault: true,
           error: null,
           devices: audio.map((d) => ({
-            id: `${d.kind}:${d.deviceId}`,
+            id: d.deviceId,
             // Labels stay empty until the page has microphone permission (M3).
             name:
               d.label ||
@@ -175,6 +266,7 @@ export class WebPlatform implements AudioPlatform {
   private async createEngine(): Promise<void> {
     const commands = this.commandRing();
     const events = MessageRing.create(RING_CAPACITY);
+    const capture = CaptureRing.create();
     // Run at the output device's native rate (like the desktop edition). Forcing a rate makes the
     // browser resample the output, and resampling loud material creates inter-sample overs that
     // clip at the destination.
@@ -189,9 +281,11 @@ export class WebPlatform implements AudioPlatform {
         commands: commands.buffer,
         events: events.buffer,
         ringCapacity: RING_CAPACITY,
+        capture: capture.buffer,
+        captureCapacity: capture.capacity,
       };
       const node = new AudioWorkletNode(ctx, PROCESSOR_NAME, {
-        numberOfInputs: 0,
+        numberOfInputs: 1,
         numberOfOutputs: 1,
         outputChannelCount: [2],
         processorOptions,
@@ -201,6 +295,11 @@ export class WebPlatform implements AudioPlatform {
       this.ctx = ctx;
       this.node = node;
       this.events = events;
+      await this.worker.call({ kind: "attachCapture", ring: capture.buffer, capacity: capture.capacity });
+      this.worker.onEvent((e) => {
+        if (e.event === "recordProgress")
+          for (const p of e.progress) for (const l of this.progressListeners) l(p);
+      });
       this.pollEvents();
       // Released audio is freed in the worklet's message handler, never in process().
       setInterval(() => void this.request({ type: "gc" }).catch(() => {}), GC_INTERVAL_MS);
@@ -239,6 +338,10 @@ export class WebPlatform implements AudioPlatform {
     cancelAnimationFrame(this.pollHandle);
     this.pollHandle = requestAnimationFrame(tick);
   }
+}
+
+function canSetSink(): boolean {
+  return typeof AudioContext !== "undefined" && "setSinkId" in AudioContext.prototype;
 }
 
 function round(x: number): number {

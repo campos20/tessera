@@ -1,18 +1,20 @@
 import { useLayoutEffect, useRef } from "react";
 import { formatBarsBeats, formatTime, type Meter } from "../arrange/timeScale";
 import { usePlayhead } from "../hooks/usePlayhead";
-import { useProject, useSession, useTransport } from "../state/hooks";
+import { useProject, useRecording, useSession, useTransport } from "../state/hooks";
+import { RecordOptions } from "./RecordOptions";
 import { LoopIcon, MagnetIcon, MetronomeIcon, PlayIcon, RecordIcon, RewindIcon, StopIcon } from "./icons";
 import { ProjectMenu } from "./ProjectMenu";
 import "./TransportBar.css";
 
 export interface TransportBarProps {
+  onOpenSettings: () => void;
   snap: boolean;
   onToggleSnap: () => void;
   onZoom: (factor: number) => void;
 }
 
-export function TransportBar({ snap, onToggleSnap, onZoom }: TransportBarProps) {
+export function TransportBar({ snap, onToggleSnap, onZoom, onOpenSettings }: TransportBarProps) {
   const session = useSession();
   const edit = useProject((s) => s.edit);
   const tempo = useProject((s) => s.project.tempo);
@@ -21,6 +23,8 @@ export function TransportBar({ snap, onToggleSnap, onZoom }: TransportBarProps) 
   const loop = useProject((s) => s.project.loop.enabled);
   const metronome = useProject((s) => s.project.metronome);
   const playing = useTransport((s) => s.playing);
+  const recording = useRecording((s) => s.active);
+  const countingIn = useTransport((s) => s.countingIn);
   const meter: Meter = { sampleRate, tempo, timeSignature };
 
   // The position display updates every animation frame without re-rendering React.
@@ -58,18 +62,25 @@ export function TransportBar({ snap, onToggleSnap, onZoom }: TransportBarProps) 
         </button>
         <button
           className={playing ? "icon-button play on" : "icon-button play"}
-          onClick={() => session.togglePlay()}
+          onClick={() => (recording ? void session.stopRecording() : session.togglePlay())}
           aria-label={playing ? "Pause" : "Play"}
           title="Play / pause (Space)"
         >
           <PlayIcon />
         </button>
-        <button className="icon-button" onClick={() => session.stop()} aria-label="Stop" title="Stop">
+        <button className="icon-button" onClick={() => session.stopAll()} aria-label="Stop" title="Stop">
           <StopIcon />
         </button>
-        <button className="icon-button record" disabled aria-label="Record" title="Recording arrives in M3">
+        <button
+          className={`icon-button record${recording ? " on" : ""}${countingIn ? " counting-in" : ""}`}
+          onClick={() => (recording ? void session.stopRecording() : void session.record())}
+          aria-pressed={recording}
+          aria-label="Record"
+          title="Record armed tracks (R)"
+        >
           <RecordIcon />
         </button>
+        <RecordOptions />
         <button
           className={loop ? "icon-button toggle on" : "icon-button toggle"}
           onClick={() => edit(loop ? "Loop off" : "Loop on", (p) => void (p.loop.enabled = !p.loop.enabled))}
@@ -120,6 +131,14 @@ export function TransportBar({ snap, onToggleSnap, onZoom }: TransportBarProps) 
       </div>
 
       <div className="view-group">
+        <button
+          className="icon-button"
+          onClick={onOpenSettings}
+          aria-label="Audio settings"
+          title="Audio settings"
+        >
+          ⚙
+        </button>
         <button
           className={snap ? "icon-button toggle on" : "icon-button toggle"}
           onClick={onToggleSnap}

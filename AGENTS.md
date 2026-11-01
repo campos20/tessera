@@ -78,7 +78,7 @@ crates/engine-core     engine: DSP, transport, mixer, command/event protocol. No
 crates/tune            pitch analysis, note segmentation, key/tempo, PSOLA rendering
 crates/project         project model, schema versions and migrations, .tessera archives
 crates/engine-wasm     raw C-ABI WASM build of engine-core for the AudioWorklet (no wasm-bindgen)
-crates/engine-native   cpal I/O, device management, MIDI (desktop)
+crates/engine-native   cpal input/output, device settings, take recorder, soak test (desktop)
 crates/media           decoding (symphonia), resampling (rubato), waveform peaks; no engine dependency
 crates/worker-wasm     raw C-ABI WASM for the web worker: decoding, project loading, archives
 crates/plugin-host     VST3/CLAP scanning and hosting (desktop)
@@ -117,6 +117,16 @@ packages/schema        generated TS types
     the app data folder, web projects in OPFS; the engine keeps imported audio for the session so
     undo/redo of imports never re-decodes.
 - [ ] **M3** Devices and recording: device settings, latency calibration, recording with punch.
+  - Accept: record a vocal through a USB audio interface in both editions; after calibration the
+    take lines up with the click within 1 ms (loopback); desktop runs at a 128-sample buffer
+    without xruns for 10 minutes (`cargo run --release -p engine-native --example soak`).
+  - Decisions: takes are 32-bit float WAVs written into the project's `audio/` folder (desktop:
+    `TakeRecorder` thread; web: worklet → `CaptureRing` (SharedArrayBuffer) → background worker
+    → OPFS); a take is one contiguous capture run (loop passes and punches split takes); latency
+    compensation shifts takes by the calibrated round-trip (per device combination, stored in the
+    UI), measured by correlating a recorded metronome with `engine_core::calibration`; desktop
+    input and output are separate cpal streams bridged by a ring buffer; arm and monitor are
+    session state, the track's input selection is saved (schema v2).
 - [ ] **M4** Tune: analysis, note editing, pitch correction, timing quantize, incremental re-render.
       First public release ("record + Tune" on the web).
 - [ ] **M5** Mixer, built-in effects, automation.

@@ -79,6 +79,8 @@ describe("hit testing", async () => {
     pan: 0,
     mute: false,
     solo: false,
+    inputChannel: 0,
+    inputStereo: false,
     clips: [
       {
         id: 5,

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Current saved-document version.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Unit of all timeline positions and lengths in a project.
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
@@ -75,6 +75,10 @@ pub struct Track {
     pub pan: f32,
     pub mute: bool,
     pub solo: bool,
+    /// Input channel (0-based) recorded when the track is armed.
+    pub input_channel: u32,
+    /// Record `input_channel` and `input_channel + 1` as a stereo pair.
+    pub input_stereo: bool,
     pub clips: Vec<Clip>,
 }
 
@@ -143,7 +147,21 @@ impl std::error::Error for ProjectError {}
 pub type Migration = fn(&mut Value) -> Result<(), String>;
 
 /// `MIGRATIONS[i]` upgrades version `i + 1` to `i + 2`. Empty while only v1 exists.
-pub const MIGRATIONS: &[Migration] = &[];
+pub const MIGRATIONS: &[Migration] = &[v1_to_v2];
+
+/// v2 (M3): tracks gain an input selection for recording; existing tracks record input 1 (mono).
+fn v1_to_v2(project: &mut Value) -> Result<(), String> {
+    let tracks = project
+        .get_mut("tracks")
+        .and_then(Value::as_array_mut)
+        .ok_or("missing tracks")?;
+    for track in tracks {
+        let track = track.as_object_mut().ok_or("track is not an object")?;
+        track.entry("inputChannel").or_insert(Value::from(0));
+        track.entry("inputStereo").or_insert(Value::from(false));
+    }
+    Ok(())
+}
 
 /// Parses a saved project, migrating older schema versions forward, and rejects projects that
 /// fail [`Project::validate`]. Every load path (web, desktop, archive import) goes through here.
@@ -280,6 +298,8 @@ mod tests {
                 pan: 0.0,
                 mute: false,
                 solo: false,
+                input_channel: 0,
+                input_stereo: false,
                 clips: vec![Clip {
                     id: 3,
                     source_id: 1,
@@ -311,7 +331,7 @@ mod tests {
         let project = sample();
         let json = save(&project);
         assert!(
-            json.contains("\"schemaVersion\": 1")
+            json.contains(&format!("\"schemaVersion\": {SCHEMA_VERSION}"))
                 && json.contains("\"fadeOut\": 480")
                 && json.contains("\"loop\"")
         );
@@ -391,6 +411,28 @@ mod tests {
         let mut p = sample();
         p.tracks[0].clips[0].offset = 10;
         assert!(p.validate().iter().any(|i| i.contains("past the end")));
+    }
+
+    #[test]
+    fn migrates_v1_projects_to_v2() {
+        // A project as M2 saved it: schema 1, tracks without an input selection.
+        let mut v1 = serde_json::to_value(sample()).unwrap();
+        v1["schemaVersion"] = Value::from(1);
+        for track in v1["tracks"].as_array_mut().unwrap() {
+            let track = track.as_object_mut().unwrap();
+            track.remove("inputChannel");
+            track.remove("inputStereo");
+        }
+        let project = load(&v1.to_string()).unwrap();
+        assert_eq!(project.schema_version, SCHEMA_VERSION);
+        assert_eq!(
+            (
+                project.tracks[0].input_channel,
+                project.tracks[0].input_stereo
+            ),
+            (0, false)
+        );
+        assert_eq!(project.tracks[0].clips, sample().tracks[0].clips);
     }
 
     #[test]

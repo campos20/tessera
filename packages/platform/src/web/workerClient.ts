@@ -1,5 +1,7 @@
 import type { WorkerRequest, WorkerResponse, WorkerResults } from "./backgroundWorker";
 
+export type WorkerEvent = Extract<WorkerResponse, { event: string }>;
+
 type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void };
 
 /** A request without its id (distributes over the union so each kind keeps its fields). */
@@ -24,8 +26,15 @@ export class WorkerClient {
   private worker: WorkerLike | undefined;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
+  private readonly eventListeners = new Set<(event: WorkerEvent) => void>();
 
   constructor(private readonly createWorker: () => WorkerLike = createBackgroundWorker) {}
+
+  /** Unsolicited messages from the worker (e.g. recording progress). */
+  onEvent(listener: (event: WorkerEvent) => void): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
 
   call<R extends Request>(request: R, transfer: Transferable[] = []): Promise<WorkerResults[R["kind"]]> {
     const worker = this.start();
@@ -41,6 +50,10 @@ export class WorkerClient {
       const worker = this.createWorker();
       worker.onmessage = (e) => {
         const response = e.data;
+        if (response.id === undefined) {
+          for (const listener of this.eventListeners) listener(response);
+          return;
+        }
         const pending = this.pending.get(response.id);
         this.pending.delete(response.id);
         if (response.ok) pending?.resolve(response.result);

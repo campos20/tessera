@@ -1,6 +1,6 @@
 import { createContext, useContext } from "react";
 import { useStore } from "zustand";
-import type { Session, SessionUiState, TransportState } from "./session";
+import type { RecordState, Session, SessionUiState, TransportState } from "./session";
 import type { ProjectActions, ProjectState } from "./store";
 
 export const SessionContext = createContext<Session | null>(null);
@@ -22,4 +22,8 @@ export function useTransport<T>(selector: (s: TransportState) => T): T {
 
 export function useSessionUi<T>(selector: (s: SessionUiState) => T): T {
   return useStore(useSession().ui, selector);
+}
+
+export function useRecording<T>(selector: (s: RecordState) => T): T {
+  return useStore(useSession().recording, selector);
 }

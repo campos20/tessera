@@ -53,6 +53,15 @@ export class OpfsStorage implements ProjectStorage {
     return (await dir.getFileHandle(name)).getFile();
   }
 
+  async deleteFile(projectId: string, path: string): Promise<void> {
+    try {
+      const { dir, name } = await resolve(await this.projectDir(projectId, false), path, false);
+      await dir.removeEntry(name);
+    } catch (e) {
+      if (!(e instanceof DOMException && e.name === "NotFoundError")) throw e;
+    }
+  }
+
   async delete(projectId: string): Promise<void> {
     await (await this.root()).removeEntry(projectId, { recursive: true });
   }

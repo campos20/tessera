@@ -253,3 +253,71 @@
 .meter .bar.clip {
   background: var(--meter-clip);
 }
+
+.track-header .ms.arm {
+  color: var(--record);
+  font-size: 10px;
+}
+
+.track-header .ms.arm.on {
+  background: var(--record);
+  border-color: var(--record);
+  color: #fff;
+}
+
+.track-header .ms.more {
+  width: 20px;
+  border-color: transparent;
+  background: none;
+}
+
+.track-header .header-row {
+  position: relative;
+}
+
+.track-header .input-meter .meter {
+  outline: 1px solid rgba(255, 69, 58, 0.5);
+}
+
+.track-menu {
+  position: absolute;
+  top: 24px;
+  right: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 190px;
+  padding: 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  cursor: default;
+}
+
+.track-menu label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-dim);
+}
+
+.track-menu select {
+  background: #0d0d0f;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 5px;
+  font: inherit;
+}
+
+.track-menu .danger {
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: none;
+  color: var(--record);
+  cursor: pointer;
+}

@@ -13,4 +13,12 @@ gain: number,
 /**
  * −1 (left) … 1 (right).
  */
-pan: number, mute: boolean, solo: boolean, clips: Array<Clip>, };
+pan: number, mute: boolean, solo: boolean, 
+/**
+ * Input channel (0-based) recorded when the track is armed.
+ */
+inputChannel: number, 
+/**
+ * Record `input_channel` and `input_channel + 1` as a stereo pair.
+ */
+inputStereo: boolean, clips: Array<Clip>, };
