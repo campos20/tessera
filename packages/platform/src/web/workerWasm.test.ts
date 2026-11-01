@@ -58,6 +58,19 @@ describe("worker.wasm", () => {
     expect(() => loadProjectJson(wasm, "not json")).toThrow(/invalid project/);
   });
 
+  it("reports overflowing clip bounds instead of wrapping (release WASM has no overflow checks)", () => {
+    // Exact u64::MAX digits: JSON.stringify would round the number.
+    const json = `{"schemaVersion":1,"id":"p","name":"Huge","sampleRate":48000,"tempo":120,
+      "timeSignature":{"numerator":4,"denominator":4},"masterGain":1,"metronome":false,
+      "loop":{"enabled":false,"start":0,"end":0},
+      "tracks":[{"id":1,"name":"T","color":"#fff","gain":1,"pan":0,"mute":false,"solo":false,
+        "clips":[{"id":3,"sourceId":2,"name":"c","start":0,"offset":18446744073709551615,"length":1,
+          "gain":1,"fadeIn":0,"fadeOut":0}]}],
+      "sources":[{"id":2,"name":"a.wav","file":"audio/a.wav","frames":48000,"channels":1,"originalSampleRate":48000}],
+      "nextId":4,"createdAt":"","modifiedAt":""}`;
+    expect(() => loadProjectJson(wasm, json)).toThrow(/clip 3 extends past the end of source 2/);
+  });
+
   it("rejects inconsistent projects with every validation issue", () => {
     const clip = {
       id: 2,

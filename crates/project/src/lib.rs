@@ -223,7 +223,14 @@ impl Project {
                         "clip {} uses missing source {}",
                         clip.id, clip.source_id
                     )),
-                    Some(source) if clip.offset + clip.length > source.frames => {
+                    // `checked_add`: crafted files can hold values near u64::MAX, and a wrapped
+                    // sum would pass this check (or panic in debug builds).
+                    Some(source)
+                        if clip
+                            .offset
+                            .checked_add(clip.length)
+                            .is_none_or(|end| end > source.frames) =>
+                    {
                         issues.push(format!(
                             "clip {} extends past the end of source {}",
                             clip.id, source.id
@@ -384,6 +391,18 @@ mod tests {
         let mut p = sample();
         p.tracks[0].clips[0].offset = 10;
         assert!(p.validate().iter().any(|i| i.contains("past the end")));
+    }
+
+    #[test]
+    fn huge_offsets_are_reported_not_wrapped() {
+        let mut p = sample();
+        p.tracks[0].clips[0].offset = u64::MAX;
+        p.tracks[0].clips[0].length = 1;
+        let err = load(&save(&p)).unwrap_err();
+        assert!(
+            err.to_string().contains("extends past the end of source"),
+            "{err}"
+        );
     }
 
     #[test]
