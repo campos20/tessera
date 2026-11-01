@@ -118,6 +118,8 @@ pub enum ProjectError {
     Invalid(String),
     /// Saved by a newer Tessera than this one.
     TooNew { version: u32 },
+    /// Well-formed but internally inconsistent (see [`Project::validate`]).
+    Inconsistent(Vec<String>),
 }
 
 impl std::fmt::Display for ProjectError {
@@ -128,6 +130,9 @@ impl std::fmt::Display for ProjectError {
                 f,
                 "this project was saved by a newer version of Tessera (schema {version}, this version reads up to {SCHEMA_VERSION})"
             ),
+            ProjectError::Inconsistent(issues) => {
+                write!(f, "the project file is inconsistent: {}", issues.join("; "))
+            }
         }
     }
 }
@@ -140,7 +145,8 @@ pub type Migration = fn(&mut Value) -> Result<(), String>;
 /// `MIGRATIONS[i]` upgrades version `i + 1` to `i + 2`. Empty while only v1 exists.
 pub const MIGRATIONS: &[Migration] = &[];
 
-/// Parses a saved project, migrating older schema versions forward.
+/// Parses a saved project, migrating older schema versions forward, and rejects projects that
+/// fail [`Project::validate`]. Every load path (web, desktop, archive import) goes through here.
 pub fn load(json: &str) -> Result<Project, ProjectError> {
     let value: Value =
         serde_json::from_str(json).map_err(|e| ProjectError::Invalid(e.to_string()))?;
@@ -178,7 +184,14 @@ fn load_value(
             .map_err(|e| ProjectError::Invalid(format!("migrating from schema {v}: {e}")))?;
         value["schemaVersion"] = Value::from(v + 1);
     }
-    serde_json::from_value(value).map_err(|e| ProjectError::Invalid(e.to_string()))
+    let project: Project =
+        serde_json::from_value(value).map_err(|e| ProjectError::Invalid(e.to_string()))?;
+    let issues = project.validate();
+    if issues.is_empty() {
+        Ok(project)
+    } else {
+        Err(ProjectError::Inconsistent(issues))
+    }
 }
 
 impl Project {
@@ -371,6 +384,23 @@ mod tests {
         let mut p = sample();
         p.tracks[0].clips[0].offset = 10;
         assert!(p.validate().iter().any(|i| i.contains("past the end")));
+    }
+
+    #[test]
+    fn load_rejects_inconsistent_projects_with_all_issues() {
+        let mut p = sample();
+        p.tracks[0].clips[0].source_id = 99;
+        p.tracks[0].id = 1; // collides with the source
+        let err = load(&save(&p)).unwrap_err();
+        let ProjectError::Inconsistent(issues) = &err else {
+            panic!("{err:?}")
+        };
+        assert_eq!(issues.len(), 2, "{issues:?}");
+        let message = err.to_string();
+        assert!(
+            message.contains("duplicate id 1") && message.contains("missing source 99"),
+            "{message}"
+        );
     }
 
     /// Exports constants next to the ts-rs bindings so TypeScript never hardcodes them.

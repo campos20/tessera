@@ -58,6 +58,39 @@ describe("worker.wasm", () => {
     expect(() => loadProjectJson(wasm, "not json")).toThrow(/invalid project/);
   });
 
+  it("rejects inconsistent projects with every validation issue", () => {
+    const clip = {
+      id: 2,
+      sourceId: 9,
+      name: "c",
+      start: 0,
+      offset: 0,
+      length: 10,
+      gain: 1,
+      fadeIn: 0,
+      fadeOut: 0,
+    };
+    const project = {
+      schemaVersion: 1,
+      id: "p",
+      name: "Broken",
+      sampleRate: 48_000,
+      tempo: 120,
+      timeSignature: { numerator: 4, denominator: 4 },
+      masterGain: 1,
+      metronome: false,
+      loop: { enabled: false, start: 0, end: 0 },
+      tracks: [{ id: 2, name: "T", color: "#fff", gain: 1, pan: 0, mute: false, solo: false, clips: [clip] }],
+      sources: [],
+      nextId: 3,
+      createdAt: "",
+      modifiedAt: "",
+    };
+    expect(() => loadProjectJson(wasm, JSON.stringify(project))).toThrow(
+      /inconsistent: duplicate id 2 \(clip\); clip 2 uses missing source 9/,
+    );
+  });
+
   it("derives extension hints", () => {
     expect(extensionOf("Take 3.WAV")).toBe("wav");
     expect(extensionOf("noext")).toBeUndefined();

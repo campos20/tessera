@@ -272,6 +272,22 @@ mod tests {
             assert!(file_in(&root, "ok", path).is_err(), "{path:?}");
         }
         assert!(import_in(&root, "bad", b"not a zip").is_err());
+        // A well-formed but inconsistent project (clip pointing at a missing source).
+        let broken = sample_project("x").replace(
+            r#""tracks":[]"#,
+            r##""tracks":[{"id":1,"name":"T","color":"#fff","gain":1.0,"pan":0.0,"mute":false,"solo":false,
+              "clips":[{"id":2,"sourceId":9,"name":"c","start":0,"offset":0,"length":10,"gain":1.0,"fadeIn":0,"fadeOut":0}]}]"##,
+        ).replace(r#""nextId":1"#, r#""nextId":3"#);
+        let zip = archive::write(&[(PROJECT_FILE.into(), broken.into_bytes())]).unwrap();
+        let err = import_in(&root, "bad", &zip).unwrap_err();
+        assert!(
+            err.contains("inconsistent") && err.contains("missing source 9"),
+            "{err}"
+        );
+        assert!(
+            !root.join("bad").exists(),
+            "nothing is written for a rejected archive"
+        );
         let no_project = archive::write(&[("audio/a.wav".into(), vec![1])]).unwrap();
         assert!(
             import_in(&root, "bad", &no_project)
