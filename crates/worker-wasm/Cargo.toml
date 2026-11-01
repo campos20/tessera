@@ -1,6 +1,6 @@
 [package]
-name = "media-wasm"
-description = "WASM build of the media crate with a raw C ABI, run in the web edition's decode worker."
+name = "worker-wasm"
+description = "WASM module for the web edition's worker: decoding (media), project loading and .tessera archives (project). Raw C ABI."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,6 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 media = { path = "../media" }
+project = { path = "../project" }
 
 [lints]
 workspace = true

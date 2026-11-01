@@ -1,7 +1,7 @@
 //! Audio import for Tessera: decoding, resampling to the engine rate, and waveform peaks.
 //!
 //! Pure Rust, so the same code runs natively (desktop) and in a Web Worker (web, through
-//! `media-wasm`). Nothing here is real-time; it all runs off the audio thread.
+//! `worker-wasm`). Nothing here is real-time; it all runs off the audio thread.
 
 mod decode;
 mod peaks;

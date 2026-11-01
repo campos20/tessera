@@ -1,6 +1,8 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod storage;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -108,7 +110,7 @@ async fn import_audio(
 }
 
 /// Decodes `%XX` escapes (as produced by `encodeURIComponent`).
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -167,13 +169,22 @@ fn main() {
     println!("Tessera audio devices:\n{}", engine_native::list_devices());
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AudioState::default())
         .invoke_handler(tauri::generate_handler![
             audio_start,
             audio_send,
             audio_info,
             list_devices,
-            import_audio
+            import_audio,
+            storage::project_list,
+            storage::project_open,
+            storage::project_save,
+            storage::project_write_file,
+            storage::project_read_file,
+            storage::project_delete,
+            storage::project_export,
+            storage::project_import
         ])
         .setup(|app| {
             spawn_event_forwarder(app.handle().clone());

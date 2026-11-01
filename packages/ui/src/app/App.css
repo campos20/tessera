@@ -1,0 +1,50 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.status-bar {
+  display: flex;
+  gap: 18px;
+  height: 24px;
+  align-items: center;
+  padding: 0 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.status-bar .spacer {
+  flex: 1;
+}
+
+.status-bar .save.unsaved,
+.status-bar .save.saving {
+  color: var(--text-dim);
+}
+
+.status-bar .save.error,
+.status-bar .error {
+  color: var(--record);
+}
+
+.status-bar .error {
+  border: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  max-width: 50vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-bar .busy {
+  color: var(--accent);
+}
+
+.status-bar .master-meter {
+  width: 120px;
+}

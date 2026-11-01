@@ -1,4 +1,4 @@
-import type { AudioDeviceList, Command, Event, SourceInfo } from "@tessera/schema";
+import type { AudioDeviceList, Command, Event, Project, SourceInfo } from "@tessera/schema";
 
 export type Edition = "web" | "desktop";
 
@@ -16,6 +16,32 @@ export interface EngineInfo {
   sampleRate: number;
 }
 
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  modifiedAt: string;
+}
+
+/**
+ * Where projects live: the browser's private file system (OPFS) on the web, the app data
+ * folder on desktop. A project is `project.json` plus its audio files under `audio/`.
+ */
+export interface ProjectStorage {
+  /** Saved projects, most recently modified first. */
+  list(): Promise<ProjectSummary[]>;
+  /** Reads a project, migrating older schema versions. Rejects invalid or too-new files. */
+  open(id: string): Promise<Project>;
+  save(project: Project): Promise<void>;
+  /** Stores a file (e.g. imported audio) at `path`, relative to the project root. */
+  writeFile(projectId: string, path: string, data: Blob): Promise<void>;
+  readFile(projectId: string, path: string): Promise<File>;
+  delete(projectId: string): Promise<void>;
+  /** Writes the project and its audio as a `.tessera` file. Resolves false if cancelled. */
+  exportArchive(projectId: string): Promise<boolean>;
+  /** Imports a `.tessera` file as a new project under `newId`. */
+  importArchive(file: File, newId: string): Promise<Project>;
+}
+
 export type Diagnostics = Record<string, string | number | boolean>;
 
 export type EngineEventListener = (event: Event) => void;
@@ -27,6 +53,7 @@ export type EngineEventListener = (event: Event) => void;
 export interface AudioPlatform {
   readonly edition: Edition;
   readonly capabilities: PlatformCapabilities;
+  readonly storage: ProjectStorage;
   /**
    * Starts the audio engine. On the web this must run from a user gesture. Safe to call
    * more than once.

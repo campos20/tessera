@@ -10,7 +10,31 @@ pitch-alignment software. It is built from one codebase in two editions:
 All DSP lives in Rust crates that compile to both WebAssembly and native code. See
 [AGENTS.md](AGENTS.md) for the architecture, conventions and roadmap.
 
-**Status:** M1 (engine core: tracks, clips, mixer, transport, metronome, audio import), with an engine testbench UI in both editions.
+**Status:** M2 (arrange view with clip editing, undo/redo, projects with autosave and `.tessera`
+import/export) on top of the M1 engine.
+
+## Using it
+
+- **Import audio:** drop files on the timeline (onto a track, or below the tracks for new ones) or
+  use **Import…**. WAV, FLAC, MP3, OGG Vorbis and M4A/AAC are supported.
+- **Edit clips:** drag to move (also across tracks), drag the edges to trim, drag the small handles
+  at the top corners for fades, Alt-drag vertically for clip gain. Edits snap to the visible grid;
+  hold ⌘/Ctrl while dragging to bypass.
+- **Projects** save automatically. The project name menu (top left) creates, renames, opens,
+  deletes, exports and imports projects (`.tessera` files carry the project and its audio).
+
+| Shortcut                         | Action                                                       |
+| -------------------------------- | ------------------------------------------------------------ |
+| Space                            | Play / pause                                                 |
+| Home / Enter, End                | Go to start / end                                            |
+| S                                | Split selected clips (or the selected track) at the playhead |
+| ⌘/Ctrl D                         | Duplicate selected clips                                     |
+| Delete / Backspace               | Delete selected clips, or the selected track                 |
+| ⌘/Ctrl Z, ⇧⌘/Ctrl Z              | Undo, redo                                                   |
+| ⌘/Ctrl A, Esc                    | Select all clips, clear selection                            |
+| L, C, N                          | Loop, metronome, snap                                        |
+| + / −, ⌘/Ctrl-scroll or pinch    | Zoom                                                         |
+| Shift-scroll or horizontal swipe | Scroll the timeline                                          |
 
 ## Prerequisites
 
@@ -54,14 +78,14 @@ crates/engine-core     platform-agnostic engine (DSP, command/event protocol); n
 crates/engine-wasm     raw C-ABI WASM build of engine-core, run inside the AudioWorklet
 crates/engine-native   cpal output stream, device enumeration, file import (desktop)
 crates/media           decoding (WAV, FLAC, MP3, OGG Vorbis, AAC/M4A), resampling, waveform peaks
-crates/media-wasm      raw C-ABI WASM build of media, run in a Web Worker
+crates/worker-wasm     raw C-ABI WASM for the web worker: decoding, project loading, archives
 crates/tune            Tune pitch editor DSP (M4)
-crates/project         project model and schema migrations (M2)
+crates/project         project model, schema versions and migrations, .tessera archives
 crates/plugin-host     VST3/CLAP hosting (M7)
 apps/web               Vite app using WebPlatform
 apps/desktop           Tauri v2 app using TauriPlatform (Rust backend in src-tauri/)
 packages/platform      AudioPlatform interface + WebPlatform + TauriPlatform
-packages/ui            shared React UI; talks only to AudioPlatform (enforced by ESLint)
+packages/ui            shared React UI (arrange view, store, engine sync); talks only to AudioPlatform
 packages/schema        TS types generated from Rust (never hand-edit src/generated)
 ```
 

@@ -1,0 +1,247 @@
+.transport-bar {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  height: 52px;
+  padding: 0 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.transport-bar .brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 200px;
+}
+
+.transport-bar .logo {
+  color: var(--accent);
+  font-size: 16px;
+}
+
+.transport-bar .app-name {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.transport-bar .project-name {
+  color: var(--text-dim);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transport-bar .transport-controls,
+.transport-bar .tempo-group,
+.transport-bar .view-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.transport-bar .view-group {
+  margin-left: auto;
+}
+
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  min-width: 30px;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-raised);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled) {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.icon-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.icon-button.play.on {
+  color: var(--solo);
+  border-color: var(--solo);
+}
+
+.icon-button.record {
+  color: var(--record);
+}
+
+.icon-button.toggle.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(255, 159, 10, 0.12);
+}
+
+.transport-bar .position-display {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 130px;
+  padding: 3px 14px;
+  border-radius: var(--radius);
+  background: #0d0d0f;
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+}
+
+.transport-bar .bars-beats {
+  font-size: 17px;
+  color: var(--accent);
+  letter-spacing: 0.04em;
+}
+
+.transport-bar .time {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.transport-bar .field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--radius);
+  background: #0d0d0f;
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.transport-bar .field input {
+  width: 46px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: 13px var(--mono);
+  text-align: right;
+  outline: none;
+}
+
+.transport-bar .field input::-webkit-inner-spin-button {
+  display: none;
+}
+
+.transport-bar .signature {
+  color: var(--text);
+  font-size: 13px;
+}
+
+/* Project menu */
+.project-menu {
+  position: relative;
+}
+
+.project-button {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.project-button:hover {
+  background: var(--panel-hover);
+  color: var(--text);
+}
+
+.project-menu .menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 260px;
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+.project-menu .menu > button,
+.project-menu .menu-file,
+.project-menu .menu-project button {
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.project-menu .menu > button:hover,
+.project-menu .menu-file:hover,
+.project-menu .menu-project button:hover {
+  background: var(--panel-hover);
+}
+
+.project-menu .menu-file input {
+  display: none;
+}
+
+.project-menu .menu-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 8px;
+  color: var(--text-dim);
+}
+
+.project-menu .menu-field input {
+  flex: 1;
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #0d0d0f;
+  color: var(--text);
+  font: inherit;
+}
+
+.project-menu .menu-heading {
+  padding: 10px 10px 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  color: var(--text-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.project-menu .menu-project {
+  display: flex;
+}
+
+.project-menu .menu-project button:first-child {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-menu .menu-project .current {
+  color: var(--accent);
+}
+
+.project-menu .menu-project .delete {
+  color: var(--text-faint);
+}
