@@ -51,7 +51,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: clippy (wasm32)
-        run: cargo clippy -p engine-wasm -p media-wasm --target wasm32-unknown-unknown -- -D warnings
+        run: cargo clippy -p engine-wasm -p worker-wasm --target wasm32-unknown-unknown -- -D warnings
 
       - name: cargo test
         run: cargo test --workspace

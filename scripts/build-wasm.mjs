@@ -1,5 +1,5 @@
 // Builds the browser WASM modules and copies them where WebPlatform imports them:
-// engine-wasm (AudioWorklet) and media-wasm (decode worker).
+// engine-wasm (AudioWorklet) and worker-wasm (background worker).
 import { execFileSync } from "node:child_process";
 import { copyFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -13,7 +13,7 @@ execFileSync(
     "-p",
     "engine-wasm",
     "-p",
-    "media-wasm",
+    "worker-wasm",
     "--target",
     "wasm32-unknown-unknown",
     "--profile",
@@ -23,7 +23,7 @@ execFileSync(
 );
 for (const [crate, name] of [
   ["engine_wasm", "engine.wasm"],
-  ["media_wasm", "media.wasm"],
+  ["worker_wasm", "worker.wasm"],
 ]) {
   const src = join(root, `target/wasm32-unknown-unknown/wasm/${crate}.wasm`);
   const dst = join(root, "packages/platform/src/web", name);

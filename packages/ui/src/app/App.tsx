@@ -1,75 +1,144 @@
 import type { AudioPlatform } from "@tessera/platform";
-import { useMemo, useState } from "react";
-import { Arrange } from "../arrange/Arrange";
-import { framesPerBar, type View, zoomAround } from "../arrange/timeScale";
-import { type MeterReading } from "../Meter";
-import { demoProject } from "../model/demoProject";
+import { useEffect, useState } from "react";
+import { Arrange, HEADER_WIDTH } from "../arrange/Arrange";
+import { type View, zoomAround } from "../arrange/timeScale";
+import { deleteClips, duplicateClips, removeTrack, splitClips } from "../model/edits";
+import { SessionContext, useProject, useSession, useSessionUi, useTransport } from "../state/hooks";
+import { Session } from "../state/session";
+import { Meter } from "../Meter";
 import { StatusBar } from "./StatusBar";
 import { TransportBar } from "./TransportBar";
 import "../theme.css";
 import "./App.css";
 
-/**
- * The DAW shell. M2 step 1 (visual checkpoint): renders a demo session; editing, the store,
- * engine sync and persistence are wired in the following steps.
- */
+/** The Tessera DAW. Creates the session for `platform` and opens the last project. */
 export function App({ platform }: { platform: AudioPlatform }) {
-  const [initial] = useState(demoProject);
-  const [project, setProject] = useState(initial.project);
+  const [session] = useState(() => new Session(platform));
+  useEffect(() => {
+    void session.init();
+    // Save pending edits when the tab is hidden or closed.
+    const flush = () => document.visibilityState === "hidden" && void session.flushSave();
+    document.addEventListener("visibilitychange", flush);
+    return () => document.removeEventListener("visibilitychange", flush);
+  }, [session]);
+
+  return (
+    <SessionContext.Provider value={session}>
+      <Workspace />
+    </SessionContext.Provider>
+  );
+}
+
+function Workspace() {
+  const session = useSession();
   const [view, setView] = useState<View>({ framesPerPx: 1200, scrollFrames: 0 });
-  const [selectedTrack, setSelectedTrack] = useState<number>();
-  const bar = framesPerBar({
-    sampleRate: project.sampleRate,
-    tempo: project.tempo,
-    timeSignature: project.timeSignature,
-  });
-  const [position, setPosition] = useState(Math.round(10.5 * bar));
-  const meters = useMemo(() => new Map<number, MeterReading>(), []);
-  const selectedClips = useMemo(() => new Set([project.tracks[3]?.clips[0]?.id ?? -1]), [project.tracks]);
+  const [snap, setSnap] = useState(true);
+  useShortcuts(setView, () => setSnap((s) => !s));
 
   return (
     <div className="app">
       <TransportBar
-        projectName={project.name}
-        playing={false}
-        position={position}
-        meter={{ sampleRate: project.sampleRate, tempo: project.tempo, timeSignature: project.timeSignature }}
-        loop={project.loop.enabled}
-        metronome={project.metronome}
-        snap
-        onPlay={() => {}}
-        onStop={() => {}}
-        onRewind={() => setPosition(0)}
-        onToggleLoop={() => setProject((p) => ({ ...p, loop: { ...p.loop, enabled: !p.loop.enabled } }))}
-        onToggleMetronome={() => setProject((p) => ({ ...p, metronome: !p.metronome }))}
-        onToggleSnap={() => {}}
-        onTempo={(tempo) => tempo > 0 && setProject((p) => ({ ...p, tempo }))}
-        onZoom={(factor) => setView((v) => zoomAround(v, factor, 0))}
+        snap={snap}
+        onToggleSnap={() => setSnap((s) => !s)}
+        onZoom={(f) => setView((v) => zoomAround(v, f, 0))}
       />
-      <Arrange
-        project={project}
-        peaks={initial.peaks}
-        view={view}
-        onView={setView}
-        position={position}
-        meters={meters}
-        selectedTrack={selectedTrack}
-        selectedClips={selectedClips}
-        onSeek={setPosition}
-        onTrackChange={(id, patch) =>
-          setProject((p) => ({ ...p, tracks: p.tracks.map((t) => (t.id === id ? { ...t, ...patch } : t)) }))
-        }
-        onSelectTrack={setSelectedTrack}
-        onAddTrack={() => {}}
-      />
-      <StatusBar
-        items={[
-          platform.edition === "web" ? "Web edition" : "Desktop edition",
-          `${project.tracks.length} tracks`,
-          `${project.sampleRate / 1000} kHz project`,
-          "Demo session (preview)",
-        ]}
-      />
+      <Arrange view={view} onView={setView} snap={snap} />
+      <Footer onError={() => session.reportError(undefined)} />
     </div>
   );
 }
+
+function Footer({ onError }: { onError: () => void }) {
+  const ui = useSessionUi((s) => s);
+  const tracks = useProject((s) => s.project.tracks.length);
+  const master = useTransport((s) => s.master);
+  const platform = useSession().platform;
+  const save = {
+    saved: "All changes saved",
+    saving: "Saving…",
+    unsaved: "Unsaved changes",
+    error: "Save failed",
+  }[ui.saveState];
+  return (
+    <StatusBar
+      items={[
+        <span key="save" data-testid="save-state" className={`save ${ui.saveState}`}>
+          {save}
+        </span>,
+        ui.busy && (
+          <span key="busy" className="busy" data-testid="busy">
+            {ui.busy}
+          </span>
+        ),
+        ui.error && (
+          <button key="error" className="error" data-testid="error" onClick={onError} title="Dismiss">
+            {ui.error} ✕
+          </button>
+        ),
+        <span key="spacer" className="spacer" />,
+        `${tracks} track${tracks === 1 ? "" : "s"}`,
+        ui.engineRate ? `${(ui.engineRate / 1000).toFixed(1)} kHz` : "Audio off",
+        platform.edition === "web" ? "Web" : "Desktop",
+        <span key="master" className="master-meter" title="Master output">
+          <Meter reading={master} testId="master-meter" />
+        </span>,
+      ]}
+    />
+  );
+}
+
+/** Keyboard shortcuts (ignored while typing in a field). */
+function useShortcuts(setView: (update: (v: View) => View) => void, toggleSnap: () => void) {
+  const session = useSession();
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("input, textarea, select, [contenteditable]")) return;
+      const s = session.store.getState();
+      const mod = e.metaKey || e.ctrlKey;
+      const selected = [...s.selection.clips];
+      const key = e.key.toLowerCase();
+
+      const handled = (() => {
+        if (key === " ") session.togglePlay();
+        else if (key === "home" || key === "enter") session.seek(0);
+        else if (key === "end") session.seek(session.end());
+        else if (mod && key === "z" && !e.shiftKey) s.undo();
+        else if ((mod && key === "z" && e.shiftKey) || (mod && key === "y")) s.redo();
+        else if (mod && key === "a")
+          s.select({ clips: new Set(s.project.tracks.flatMap((t) => t.clips.map((c) => c.id))) });
+        else if (mod && key === "d" && selected.length) {
+          let created: number[] = [];
+          s.edit("Duplicate", (p) => void (created = duplicateClips(p, selected)));
+          s.select({ clips: new Set(created) });
+        } else if (!mod && key === "s") {
+          // Split the selected clips, or every clip under the playhead on the selected track.
+          const frame = session.transport.getState().position;
+          const track = s.project.tracks.find((t) => t.id === s.selection.track);
+          const ids = selected.length ? selected : (track?.clips.map((c) => c.id) ?? []);
+          if (ids.length) s.edit("Split", (p) => void splitClips(p, ids, frame));
+        } else if (key === "delete" || key === "backspace") {
+          if (selected.length) s.edit("Delete clips", (p) => deleteClips(p, selected));
+          else if (s.selection.track !== undefined) {
+            const id = s.selection.track;
+            s.edit("Delete track", (p) => removeTrack(p, id));
+          } else return false;
+        } else if (key === "escape") s.select({ clips: new Set() });
+        else if (!mod && key === "l") s.edit("Loop", (p) => void (p.loop.enabled = !p.loop.enabled));
+        else if (!mod && key === "c") s.edit("Metronome", (p) => void (p.metronome = !p.metronome));
+        else if (!mod && key === "n") toggleSnap();
+        else if (key === "=" || key === "+") setView((v) => zoomAround(v, 1 / 1.5, playheadX(v)));
+        else if (key === "-") setView((v) => zoomAround(v, 1.5, playheadX(v)));
+        else return false;
+        return true;
+      })();
+      if (handled) e.preventDefault();
+    };
+    const playheadX = (v: View) =>
+      Math.max(0, (session.transport.getState().position - v.scrollFrames) / v.framesPerPx);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [session, setView, toggleSnap]);
+}
+
+export { HEADER_WIDTH };

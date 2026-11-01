@@ -7,7 +7,9 @@ import type {
   EngineEventListener,
   EngineInfo,
   PlatformCapabilities,
+  ProjectStorage,
 } from "../index";
+import { TauriStorage } from "./storage";
 
 /** Must match the event name emitted by apps/desktop/src-tauri. */
 const ENGINE_EVENTS = "engine-events";
@@ -21,6 +23,7 @@ export class TauriPlatform implements AudioPlatform {
     midi: false, // midir lands in M6.
   };
 
+  readonly storage: ProjectStorage = new TauriStorage();
   private starting: Promise<EngineInfo> | undefined;
   private started = false;
   private pending: Command[] = [];

@@ -8,6 +8,8 @@
 //! Timeline positions and lengths are frames at [`PROJECT_SAMPLE_RATE`], independent of the
 //! audio device; the UI converts them to engine frames when talking to the engine.
 
+pub mod archive;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -140,7 +142,8 @@ pub const MIGRATIONS: &[Migration] = &[];
 
 /// Parses a saved project, migrating older schema versions forward.
 pub fn load(json: &str) -> Result<Project, ProjectError> {
-    let value: Value = serde_json::from_str(json).map_err(|e| ProjectError::Invalid(e.to_string()))?;
+    let value: Value =
+        serde_json::from_str(json).map_err(|e| ProjectError::Invalid(e.to_string()))?;
     load_value(value, MIGRATIONS, SCHEMA_VERSION)
 }
 
@@ -149,13 +152,20 @@ pub fn save(project: &Project) -> String {
     serde_json::to_string_pretty(project).expect("projects always serialize")
 }
 
-fn load_value(mut value: Value, migrations: &[Migration], current: u32) -> Result<Project, ProjectError> {
+fn load_value(
+    mut value: Value,
+    migrations: &[Migration],
+    current: u32,
+) -> Result<Project, ProjectError> {
     let version = value
         .get("schemaVersion")
         .and_then(Value::as_u64)
-        .ok_or_else(|| ProjectError::Invalid("missing schemaVersion".into()))? as u32;
+        .ok_or_else(|| ProjectError::Invalid("missing schemaVersion".into()))?
+        as u32;
     if version == 0 {
-        return Err(ProjectError::Invalid("schemaVersion must be at least 1".into()));
+        return Err(ProjectError::Invalid(
+            "schemaVersion must be at least 1".into(),
+        ));
     }
     if version > current {
         return Err(ProjectError::TooNew { version });
@@ -164,7 +174,8 @@ fn load_value(mut value: Value, migrations: &[Migration], current: u32) -> Resul
         let migrate = migrations
             .get((v - 1) as usize)
             .ok_or_else(|| ProjectError::Invalid(format!("no migration from schema {v}")))?;
-        migrate(&mut value).map_err(|e| ProjectError::Invalid(format!("migrating from schema {v}: {e}")))?;
+        migrate(&mut value)
+            .map_err(|e| ProjectError::Invalid(format!("migrating from schema {v}: {e}")))?;
         value["schemaVersion"] = Value::from(v + 1);
     }
     serde_json::from_value(value).map_err(|e| ProjectError::Invalid(e.to_string()))
@@ -181,7 +192,10 @@ impl Project {
                 issues.push(format!("duplicate id {id} ({kind})"));
             }
             if id >= self.next_id {
-                issues.push(format!("{kind} id {id} is not below nextId {}", self.next_id));
+                issues.push(format!(
+                    "{kind} id {id} is not below nextId {}",
+                    self.next_id
+                ));
             }
         };
         for source in &self.sources {
@@ -192,16 +206,25 @@ impl Project {
             for clip in &track.clips {
                 check_id("clip", clip.id, &mut issues);
                 match self.sources.iter().find(|s| s.id == clip.source_id) {
-                    None => issues.push(format!("clip {} uses missing source {}", clip.id, clip.source_id)),
+                    None => issues.push(format!(
+                        "clip {} uses missing source {}",
+                        clip.id, clip.source_id
+                    )),
                     Some(source) if clip.offset + clip.length > source.frames => {
-                        issues.push(format!("clip {} extends past the end of source {}", clip.id, source.id));
+                        issues.push(format!(
+                            "clip {} extends past the end of source {}",
+                            clip.id, source.id
+                        ));
                     }
                     Some(_) => {}
                 }
             }
         }
         if self.sample_rate != PROJECT_SAMPLE_RATE {
-            issues.push(format!("sampleRate {} is not {PROJECT_SAMPLE_RATE}", self.sample_rate));
+            issues.push(format!(
+                "sampleRate {} is not {PROJECT_SAMPLE_RATE}",
+                self.sample_rate
+            ));
         }
         issues
     }
@@ -218,10 +241,17 @@ mod tests {
             name: "Demo".into(),
             sample_rate: PROJECT_SAMPLE_RATE,
             tempo: 120.0,
-            time_signature: TimeSignature { numerator: 4, denominator: 4 },
+            time_signature: TimeSignature {
+                numerator: 4,
+                denominator: 4,
+            },
             master_gain: 1.0,
             metronome: false,
-            loop_region: LoopRegion { enabled: false, start: 0, end: 0 },
+            loop_region: LoopRegion {
+                enabled: false,
+                start: 0,
+                end: 0,
+            },
             tracks: vec![Track {
                 id: 2,
                 name: "Vocals".into(),
@@ -260,7 +290,11 @@ mod tests {
     fn save_load_round_trip_with_camel_case_keys() {
         let project = sample();
         let json = save(&project);
-        assert!(json.contains("\"schemaVersion\": 1") && json.contains("\"fadeOut\": 480") && json.contains("\"loop\""));
+        assert!(
+            json.contains("\"schemaVersion\": 1")
+                && json.contains("\"fadeOut\": 480")
+                && json.contains("\"loop\"")
+        );
         assert_eq!(load(&json).unwrap(), project);
         assert!(project.validate().is_empty(), "{:?}", project.validate());
     }
@@ -269,18 +303,33 @@ mod tests {
     fn rejects_newer_missing_and_garbage_versions() {
         let mut v = serde_json::to_value(sample()).unwrap();
         v["schemaVersion"] = Value::from(SCHEMA_VERSION + 1);
-        assert_eq!(load(&v.to_string()), Err(ProjectError::TooNew { version: SCHEMA_VERSION + 1 }));
+        assert_eq!(
+            load(&v.to_string()),
+            Err(ProjectError::TooNew {
+                version: SCHEMA_VERSION + 1
+            })
+        );
         v.as_object_mut().unwrap().remove("schemaVersion");
-        assert!(matches!(load(&v.to_string()), Err(ProjectError::Invalid(_))));
+        assert!(matches!(
+            load(&v.to_string()),
+            Err(ProjectError::Invalid(_))
+        ));
         assert!(matches!(load("not json"), Err(ProjectError::Invalid(_))));
-        assert!(matches!(load(r#"{"schemaVersion": 1}"#), Err(ProjectError::Invalid(_))));
+        assert!(matches!(
+            load(r#"{"schemaVersion": 1}"#),
+            Err(ProjectError::Invalid(_))
+        ));
     }
 
     #[test]
     fn migrations_run_in_order_up_to_current() {
         // Pretend v1 named the field "title" and v2 renamed it "name"; v3 added "metronome".
         fn v1_to_v2(v: &mut Value) -> Result<(), String> {
-            let title = v.as_object_mut().unwrap().remove("title").ok_or("missing title")?;
+            let title = v
+                .as_object_mut()
+                .unwrap()
+                .remove("title")
+                .ok_or("missing title")?;
             v["name"] = title;
             Ok(())
         }

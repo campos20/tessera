@@ -1,26 +1,42 @@
+import { useLayoutEffect, useRef } from "react";
 import { formatBarsBeats, formatTime, type Meter } from "../arrange/timeScale";
+import { usePlayhead } from "../hooks/usePlayhead";
+import { useProject, useSession, useTransport } from "../state/hooks";
 import { LoopIcon, MagnetIcon, MetronomeIcon, PlayIcon, RecordIcon, RewindIcon, StopIcon } from "./icons";
+import { ProjectMenu } from "./ProjectMenu";
 import "./TransportBar.css";
 
 export interface TransportBarProps {
-  projectName: string;
-  playing: boolean;
-  position: number;
-  meter: Meter;
-  loop: boolean;
-  metronome: boolean;
   snap: boolean;
-  onPlay: () => void;
-  onStop: () => void;
-  onRewind: () => void;
-  onToggleLoop: () => void;
-  onToggleMetronome: () => void;
   onToggleSnap: () => void;
-  onTempo: (bpm: number) => void;
   onZoom: (factor: number) => void;
 }
 
-export function TransportBar(p: TransportBarProps) {
+export function TransportBar({ snap, onToggleSnap, onZoom }: TransportBarProps) {
+  const session = useSession();
+  const edit = useProject((s) => s.edit);
+  const tempo = useProject((s) => s.project.tempo);
+  const timeSignature = useProject((s) => s.project.timeSignature);
+  const sampleRate = useProject((s) => s.project.sampleRate);
+  const loop = useProject((s) => s.project.loop.enabled);
+  const metronome = useProject((s) => s.project.metronome);
+  const playing = useTransport((s) => s.playing);
+  const meter: Meter = { sampleRate, tempo, timeSignature };
+
+  // The position display updates every animation frame without re-rendering React.
+  const barsBeats = useRef<HTMLSpanElement>(null);
+  const time = useRef<HTMLSpanElement>(null);
+  const display = useRef<HTMLDivElement>(null);
+  const meterRef = useRef(meter);
+  useLayoutEffect(() => {
+    meterRef.current = meter;
+  });
+  usePlayhead((frame) => {
+    if (barsBeats.current) barsBeats.current.textContent = formatBarsBeats(frame, meterRef.current);
+    if (time.current) time.current.textContent = formatTime(frame, meterRef.current.sampleRate);
+    display.current?.setAttribute("data-frames", String(Math.round(frame)));
+  });
+
   return (
     <header className="transport-bar">
       <div className="brand">
@@ -28,38 +44,36 @@ export function TransportBar(p: TransportBarProps) {
           ▦
         </span>
         <span className="app-name">Tessera</span>
-        <span className="project-name" title={p.projectName}>
-          {p.projectName}
-        </span>
+        <ProjectMenu />
       </div>
 
       <div className="transport-controls" role="group" aria-label="Transport">
         <button
           className="icon-button"
-          onClick={p.onRewind}
+          onClick={() => session.seek(0)}
           aria-label="Return to start"
           title="Return to start (Home)"
         >
           <RewindIcon />
         </button>
         <button
-          className={p.playing ? "icon-button play on" : "icon-button play"}
-          onClick={p.playing ? p.onStop : p.onPlay}
-          aria-label={p.playing ? "Pause" : "Play"}
+          className={playing ? "icon-button play on" : "icon-button play"}
+          onClick={() => session.togglePlay()}
+          aria-label={playing ? "Pause" : "Play"}
           title="Play / pause (Space)"
         >
           <PlayIcon />
         </button>
-        <button className="icon-button" onClick={p.onStop} aria-label="Stop" title="Stop">
+        <button className="icon-button" onClick={() => session.stop()} aria-label="Stop" title="Stop">
           <StopIcon />
         </button>
         <button className="icon-button record" disabled aria-label="Record" title="Recording arrives in M3">
           <RecordIcon />
         </button>
         <button
-          className={p.loop ? "icon-button toggle on" : "icon-button toggle"}
-          onClick={p.onToggleLoop}
-          aria-pressed={p.loop}
+          className={loop ? "icon-button toggle on" : "icon-button toggle"}
+          onClick={() => edit(loop ? "Loop off" : "Loop on", (p) => void (p.loop.enabled = !p.loop.enabled))}
+          aria-pressed={loop}
           aria-label="Loop"
           title="Loop (L)"
         >
@@ -67,31 +81,37 @@ export function TransportBar(p: TransportBarProps) {
         </button>
       </div>
 
-      <div className="position-display" data-testid="position" data-frames={p.position}>
-        <span className="bars-beats">{formatBarsBeats(p.position, p.meter)}</span>
-        <span className="time">{formatTime(p.position, p.meter.sampleRate)}</span>
+      <div className="position-display" data-testid="position" data-frames="0" ref={display}>
+        <span className="bars-beats" ref={barsBeats}>
+          1.1.000
+        </span>
+        <span className="time" ref={time}>
+          0:00.000
+        </span>
       </div>
 
       <div className="tempo-group">
         <label className="field">
           <input
+            key={tempo}
             type="number"
             min={20}
             max={300}
             step={0.1}
-            value={p.meter.tempo}
-            onChange={(e) => p.onTempo(Number(e.target.value))}
+            defaultValue={tempo}
+            onBlur={(e) => commitTempo(Number(e.target.value))}
+            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
             aria-label="Tempo"
           />
           <span>BPM</span>
         </label>
         <span className="field signature">
-          {p.meter.timeSignature.numerator}/{p.meter.timeSignature.denominator}
+          {timeSignature.numerator}/{timeSignature.denominator}
         </span>
         <button
-          className={p.metronome ? "icon-button toggle on" : "icon-button toggle"}
-          onClick={p.onToggleMetronome}
-          aria-pressed={p.metronome}
+          className={metronome ? "icon-button toggle on" : "icon-button toggle"}
+          onClick={() => edit("Metronome", (p) => void (p.metronome = !p.metronome))}
+          aria-pressed={metronome}
           aria-label="Metronome"
           title="Metronome (C)"
         >
@@ -101,17 +121,17 @@ export function TransportBar(p: TransportBarProps) {
 
       <div className="view-group">
         <button
-          className={p.snap ? "icon-button toggle on" : "icon-button toggle"}
-          onClick={p.onToggleSnap}
-          aria-pressed={p.snap}
+          className={snap ? "icon-button toggle on" : "icon-button toggle"}
+          onClick={onToggleSnap}
+          aria-pressed={snap}
           aria-label="Snap to grid"
-          title="Snap to grid (N)"
+          title="Snap to grid (N) — hold ⌘/Ctrl while dragging to bypass"
         >
           <MagnetIcon />
         </button>
         <button
           className="icon-button"
-          onClick={() => p.onZoom(1.5)}
+          onClick={() => onZoom(1.5)}
           aria-label="Zoom out"
           title="Zoom out (−)"
         >
@@ -119,7 +139,7 @@ export function TransportBar(p: TransportBarProps) {
         </button>
         <button
           className="icon-button"
-          onClick={() => p.onZoom(1 / 1.5)}
+          onClick={() => onZoom(1 / 1.5)}
           aria-label="Zoom in"
           title="Zoom in (+)"
         >
@@ -128,4 +148,10 @@ export function TransportBar(p: TransportBarProps) {
       </div>
     </header>
   );
+
+  function commitTempo(bpm: number) {
+    if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 300 && bpm !== tempo) {
+      edit("Change tempo", (p) => void (p.tempo = bpm));
+    }
+  }
 }

@@ -1,4 +1,5 @@
 import type { Clip, Peaks, Track } from "@tessera/schema";
+import { CLIP_HEADER } from "./hitTest";
 import { frameToX, type GridLine, type View } from "./timeScale";
 import { levelFor, pyramidFor } from "./waveform";
 
@@ -9,7 +10,6 @@ export interface LaneStyle {
   loop: string;
 }
 
-const CLIP_HEADER = 15;
 const CLIP_RADIUS = 4;
 
 /** Draws one track lane: grid, loop shading and clips with waveforms. */

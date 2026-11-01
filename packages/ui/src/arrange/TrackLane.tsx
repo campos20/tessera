@@ -1,5 +1,5 @@
 import type { Peaks, Track } from "@tessera/schema";
-import { useRef } from "react";
+import { type PointerEventHandler, useRef } from "react";
 import { useCanvas } from "../hooks/useCanvas";
 import { drawLane } from "./drawLane";
 import type { GridLine, View } from "./timeScale";
@@ -14,6 +14,9 @@ export interface TrackLaneProps {
   selected: ReadonlySet<number>;
   loop: { enabled: boolean; start: number; end: number };
   alternate: boolean;
+  onPointerDown: PointerEventHandler<HTMLCanvasElement>;
+  onPointerMove: PointerEventHandler<HTMLCanvasElement>;
+  onPointerUp: PointerEventHandler<HTMLCanvasElement>;
 }
 
 const STYLE = {
@@ -44,6 +47,10 @@ export function TrackLane(p: TrackLaneProps) {
       className="track-lane"
       style={{ width: p.width, height: p.height }}
       data-testid={`lane-${p.track.id}`}
+      onPointerDown={p.onPointerDown}
+      onPointerMove={p.onPointerMove}
+      onPointerUp={p.onPointerUp}
+      onPointerCancel={p.onPointerUp}
     />
   );
 }

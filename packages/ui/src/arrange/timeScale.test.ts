@@ -68,3 +68,48 @@ describe("waveform pyramid", () => {
     expect(levelFor(pyramid, 10_000).framesPerPeak).toBe(512);
   });
 });
+
+describe("hit testing", async () => {
+  const { hitTestClip } = await import("./hitTest");
+  const track = {
+    id: 1,
+    name: "T",
+    color: "#ffffff",
+    gain: 1,
+    pan: 0,
+    mute: false,
+    solo: false,
+    clips: [
+      {
+        id: 5,
+        sourceId: 1,
+        name: "c",
+        start: 1000,
+        offset: 0,
+        length: 10_000,
+        gain: 1,
+        fadeIn: 2000,
+        fadeOut: 0,
+      },
+    ],
+  };
+  const view = { framesPerPx: 100, scrollFrames: 0 }; // clip spans x = 10…110
+
+  it("finds edges, fade handles and the body", () => {
+    expect(hitTestClip(track, view, 12, 40)?.part).toBe("trim-start");
+    expect(hitTestClip(track, view, 108, 40)?.part).toBe("trim-end");
+    expect(hitTestClip(track, view, 30, 5)?.part).toBe("fade-in"); // fade-in ends at x = 30
+    expect(hitTestClip(track, view, 109, 5)?.part).toBe("fade-out");
+    expect(hitTestClip(track, view, 60, 40)?.part).toBe("body");
+    expect(hitTestClip(track, view, 5, 40)).toBeUndefined();
+  });
+});
+
+describe("snapping", async () => {
+  const { gridStep, snapToGrid } = await import("./timeScale");
+  it("snaps to the finest visible grid line", () => {
+    expect(gridStep({ framesPerPx: 100, scrollFrames: 0 }, meter)).toBe(6000);
+    expect(snapToGrid(8_999, 6000)).toBe(6000);
+    expect(snapToGrid(9_001, 6000)).toBe(12_000);
+  });
+});

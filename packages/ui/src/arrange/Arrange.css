@@ -35,6 +35,24 @@
   cursor: pointer;
 }
 
+.arrange .corner {
+  gap: 6px;
+}
+
+.arrange .add-track.import {
+  display: inline-flex;
+  align-items: center;
+}
+
+.arrange .add-track.import input {
+  display: none;
+}
+
+.arrange .tracks-scroll.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}
+
 .arrange .add-track:hover {
   color: var(--text);
   background: var(--panel-hover);
@@ -67,6 +85,7 @@
 }
 
 .arrange .playhead {
+  display: none;
   position: absolute;
   top: 0;
   bottom: 0;
@@ -78,8 +97,21 @@
 }
 
 .arrange .empty-hint {
-  padding: 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 48px auto;
+  max-width: 420px;
+  padding: 28px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 10px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.arrange .empty-hint span {
   color: var(--text-faint);
+  font-size: 12px;
 }
 
 /* Track header */
@@ -98,8 +130,31 @@
 }
 
 .track-header .color-strip {
-  width: 5px;
+  width: 6px;
+  padding: 0;
+  border: 0;
   background: var(--track-color);
+  cursor: pointer;
+}
+
+.track-header .track-name-input {
+  flex: 1;
+  min-width: 0;
+  padding: 1px 4px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: #0d0d0f;
+  color: var(--text);
+  font: 600 13px var(--font);
+}
+
+.track-header {
+  cursor: grab;
+}
+
+.track-header button,
+.track-header input {
+  cursor: pointer;
 }
 
 .track-header .header-body {

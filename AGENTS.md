@@ -76,16 +76,16 @@ Before handing work back, run `cargo fmt --all`, `cargo clippy --workspace --all
 ```
 crates/engine-core     engine: DSP, transport, mixer, command/event protocol. No I/O, no threads
 crates/tune            pitch analysis, note segmentation, key/tempo, PSOLA rendering
-crates/project         project model, serde schema versions, migrations
+crates/project         project model, schema versions and migrations, .tessera archives
 crates/engine-wasm     raw C-ABI WASM build of engine-core for the AudioWorklet (no wasm-bindgen)
 crates/engine-native   cpal I/O, device management, MIDI (desktop)
 crates/media           decoding (symphonia), resampling (rubato), waveform peaks; no engine dependency
-crates/media-wasm      raw C-ABI WASM build of media, run in a Web Worker
+crates/worker-wasm     raw C-ABI WASM for the web worker: decoding, project loading, archives
 crates/plugin-host     VST3/CLAP scanning and hosting (desktop)
 apps/web               Vite app using WebPlatform (COOP/COEP headers, or public/coi-sw.js on GitHub Pages)
 apps/desktop           Tauri v2 app using TauriPlatform; Rust backend in src-tauri/
 packages/platform      AudioPlatform interface + WebPlatform + TauriPlatform
-packages/ui            shared React UI
+packages/ui            shared React UI: arrange view, store (Zustand + immer undo), EngineSync, Session
 packages/schema        generated TS types
 ```
 
@@ -101,7 +101,7 @@ packages/schema        generated TS types
 ## Roadmap
 
 - [x] **M0** Skeleton, CI, "hello sine" in both editions from the same engine-core oscillator.
-- [ ] **M1** Engine core: graph, transport, clip playback, mixer basics, file import, offline render.
+- [x] **M1** Engine core: graph, transport, clip playback, mixer basics, file import, offline render.
   - Accept: a 2-track project rendered offline matches a golden file (−90 dB); a project with no
     processing renders within −90 dB of its sources; no allocations on the audio thread
     (`assert_no_alloc`, including a 64-track random-command stress test); 16 tracks play
@@ -109,6 +109,13 @@ packages/schema        generated TS types
   - Decisions: decoding lives in `crates/media`; the web edition stays on stable Rust, so decoded
     audio is copied into the worklet's WASM memory in chunks at import time, never in `process()`.
 - [ ] **M2** Timeline UI and projects: arrange view, undo/redo, save/load, `.tessera` zip, migrations.
+  - Accept: create, edit, save, reload and continue editing a project in both editions; a
+    Playwright E2E test covers the web flow.
+  - Decisions: timeline positions are frames at a fixed 48 kHz project rate (`crates/project`),
+    converted to engine frames only in `EngineSync`; `.tessera` is an uncompressed zip written by
+    one Rust implementation (native on desktop, `worker-wasm` on the web); desktop projects live in
+    the app data folder, web projects in OPFS; the engine keeps imported audio for the session so
+    undo/redo of imports never re-decodes.
 - [ ] **M3** Devices and recording: device settings, latency calibration, recording with punch.
 - [ ] **M4** Tune: analysis, note editing, pitch correction, timing quantize, incremental re-render.
       First public release ("record + Tune" on the web).

@@ -1,0 +1,424 @@
+//! WASM module for the web edition's worker: audio decoding (`media`), project loading with
+//! migrations and `.tessera` archives (`project`).
+//!
+//! Raw C ABI with no imports (like `engine-wasm`). Inputs are copied into memory from
+//! [`worker_alloc`] and their ownership passes to the called function. Decoding returns an
+//! [`ImportResult`] read through the `media_result_*` accessors; the project functions return a
+//! [`BytesResult`] read through the `bytes_result_*` accessors. Free every result.
+
+use media::{Imported, import};
+
+pub struct ImportResult {
+    result: Result<Imported, String>,
+}
+
+/// Allocates `len` bytes for the caller to fill. Ownership passes to [`media_import`], or
+/// back to [`worker_free`].
+#[unsafe(no_mangle)]
+pub extern "C" fn worker_alloc(len: usize) -> *mut u8 {
+    Box::into_raw(vec![0u8; len].into_boxed_slice()).cast()
+}
+
+/// # Safety
+/// `ptr`/`len` must come from [`worker_alloc`] and not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn worker_free(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() {
+        // SAFETY: caller guarantees this is a boxed slice from `worker_alloc`.
+        drop(unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(ptr, len)) });
+    }
+}
+
+/// Decodes the file in `data` (taking ownership), resamples it to `target_rate` and computes
+/// peaks. `ext` is an optional file-extension hint (UTF-8, may be null). Never returns null.
+///
+/// # Safety
+/// `data`/`data_len` must come from [`worker_alloc`]; `ext`/`ext_len` must be null/0 or a
+/// valid UTF-8 range.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_import(
+    data: *mut u8,
+    data_len: usize,
+    ext: *const u8,
+    ext_len: usize,
+    target_rate: u32,
+) -> *mut ImportResult {
+    let bytes = if data.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: caller guarantees this is a boxed slice from `worker_alloc`.
+        unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(data, data_len)) }.into_vec()
+    };
+    let ext = if ext.is_null() {
+        None
+    } else {
+        // SAFETY: caller guarantees a valid range.
+        core::str::from_utf8(unsafe { core::slice::from_raw_parts(ext, ext_len) }).ok()
+    };
+    let result = import(bytes, ext, target_rate).map_err(|e| e.to_string());
+    Box::into_raw(Box::new(ImportResult { result }))
+}
+
+/// Shared accessor plumbing: `None` when the handle is null or the import failed.
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+unsafe fn imported<'a>(handle: *const ImportResult) -> Option<&'a Imported> {
+    // SAFETY: caller guarantees `handle` is null or live.
+    unsafe { handle.as_ref() }.and_then(|h| h.result.as_ref().ok())
+}
+
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_ok(handle: *const ImportResult) -> u32 {
+    // SAFETY: forwarded.
+    unsafe { imported(handle) }.is_some() as u32
+}
+
+/// UTF-8 error message (empty on success); length from [`media_result_error_len`].
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_error_ptr(handle: *const ImportResult) -> *const u8 {
+    // SAFETY: caller guarantees `handle` is null or live.
+    match unsafe { handle.as_ref() }.map(|h| &h.result) {
+        Some(Err(e)) => e.as_ptr(),
+        _ => core::ptr::null(),
+    }
+}
+
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_error_len(handle: *const ImportResult) -> usize {
+    // SAFETY: caller guarantees `handle` is null or live.
+    match unsafe { handle.as_ref() }.map(|h| &h.result) {
+        Some(Err(e)) => e.len(),
+        _ => 0,
+    }
+}
+
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_channels(handle: *const ImportResult) -> u32 {
+    // SAFETY: forwarded.
+    unsafe { imported(handle) }.map_or(0, |i| i.channels.len() as u32)
+}
+
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_frames(handle: *const ImportResult) -> u32 {
+    // SAFETY: forwarded.
+    unsafe { imported(handle) }.map_or(0, |i| i.frames() as u32)
+}
+
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_original_rate(handle: *const ImportResult) -> u32 {
+    // SAFETY: forwarded.
+    unsafe { imported(handle) }.map_or(0, |i| i.original_sample_rate)
+}
+
+/// Planar samples of channel `ch` (length [`media_result_frames`]), or null.
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_channel_ptr(
+    handle: *const ImportResult,
+    ch: u32,
+) -> *const f32 {
+    // SAFETY: forwarded.
+    unsafe { imported(handle) }
+        .and_then(|i| i.channels.get(ch as usize))
+        .map_or(core::ptr::null(), |c| c.as_ptr())
+}
+
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_frames_per_peak(handle: *const ImportResult) -> u32 {
+    // SAFETY: forwarded.
+    unsafe { imported(handle) }.map_or(0, |i| i.peaks.frames_per_peak)
+}
+
+/// Number of `f32`s in channel `ch`'s `[min, max, ...]` peak data.
+///
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_peaks_len(handle: *const ImportResult, ch: u32) -> u32 {
+    // SAFETY: forwarded.
+    unsafe { imported(handle) }
+        .and_then(|i| i.peaks.data.get(ch as usize))
+        .map_or(0, |p| p.len() as u32)
+}
+
+/// # Safety
+/// `handle` must be null or a live pointer from [`media_import`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_peaks_ptr(
+    handle: *const ImportResult,
+    ch: u32,
+) -> *const f32 {
+    // SAFETY: forwarded.
+    unsafe { imported(handle) }
+        .and_then(|i| i.peaks.data.get(ch as usize))
+        .map_or(core::ptr::null(), |p| p.as_ptr())
+}
+
+/// # Safety
+/// `handle` must come from [`media_import`] and not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn media_result_free(handle: *mut ImportResult) {
+    if !handle.is_null() {
+        // SAFETY: caller guarantees ownership.
+        drop(unsafe { Box::from_raw(handle) });
+    }
+}
+
+/// A byte-string result: UTF-8 JSON, archive bytes or framed entries, or an error message.
+pub struct BytesResult {
+    result: Result<Vec<u8>, String>,
+}
+
+fn bytes_result(result: Result<Vec<u8>, String>) -> *mut BytesResult {
+    Box::into_raw(Box::new(BytesResult { result }))
+}
+
+/// Takes ownership of a buffer from [`worker_alloc`].
+///
+/// # Safety
+/// `data`/`len` must be null/0 or come from [`worker_alloc`].
+unsafe fn take_input(data: *mut u8, len: usize) -> Vec<u8> {
+    if data.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: caller guarantees this is a boxed slice from `worker_alloc`.
+    unsafe { Box::from_raw(core::ptr::slice_from_raw_parts_mut(data, len)) }.into_vec()
+}
+
+/// Parses a saved `project.json`, migrating older schema versions, and returns it as current
+/// JSON. Fails for invalid or newer-than-supported projects.
+///
+/// # Safety
+/// `data`/`len` must come from [`worker_alloc`] (ownership is taken).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn project_load(data: *mut u8, len: usize) -> *mut BytesResult {
+    // SAFETY: forwarded.
+    let input = unsafe { take_input(data, len) };
+    bytes_result(
+        core::str::from_utf8(&input)
+            .map_err(|e| e.to_string())
+            .and_then(|json| project::load(json).map_err(|e| e.to_string()))
+            .map(|p| project::save(&p).into_bytes()),
+    )
+}
+
+/// Builds a `.tessera` archive from framed entries: repeated
+/// `[u32 name length][name][u32 data length][data]`, little-endian.
+///
+/// # Safety
+/// `data`/`len` must come from [`worker_alloc`] (ownership is taken).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn archive_pack(data: *mut u8, len: usize) -> *mut BytesResult {
+    // SAFETY: forwarded.
+    let input = unsafe { take_input(data, len) };
+    bytes_result(
+        unframe(&input)
+            .and_then(|entries| project::archive::write(&entries).map_err(|e| e.to_string())),
+    )
+}
+
+/// Reads a `.tessera` archive and returns its entries framed as for [`archive_pack`].
+///
+/// # Safety
+/// `data`/`len` must come from [`worker_alloc`] (ownership is taken).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn archive_unpack(data: *mut u8, len: usize) -> *mut BytesResult {
+    // SAFETY: forwarded.
+    let input = unsafe { take_input(data, len) };
+    bytes_result(
+        project::archive::read(&input)
+            .map(|entries| frame(&entries))
+            .map_err(|e| e.to_string()),
+    )
+}
+
+fn frame(entries: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, data) in entries {
+        out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+    }
+    out
+}
+
+fn unframe(mut input: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut take = |n: usize| -> Result<&[u8], String> {
+        let (head, rest) = input.split_at_checked(n).ok_or("truncated entry list")?;
+        input = rest;
+        Ok(head)
+    };
+    let mut entries = Vec::new();
+    while let Ok(len) = take(4) {
+        let name_len = u32::from_le_bytes(len.try_into().unwrap()) as usize;
+        let name = String::from_utf8(take(name_len)?.to_vec()).map_err(|e| e.to_string())?;
+        let data_len = u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+        entries.push((name, take(data_len)?.to_vec()));
+    }
+    Ok(entries)
+}
+
+/// # Safety
+/// `handle` must be null or a live pointer from a function returning [`BytesResult`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bytes_result_ok(handle: *const BytesResult) -> u32 {
+    // SAFETY: caller guarantees `handle` is null or live.
+    unsafe { handle.as_ref() }.is_some_and(|h| h.result.is_ok()) as u32
+}
+
+/// Pointer to the output bytes, or to the UTF-8 error message on failure.
+///
+/// # Safety
+/// `handle` must be null or a live pointer from a function returning [`BytesResult`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bytes_result_ptr(handle: *const BytesResult) -> *const u8 {
+    // SAFETY: caller guarantees `handle` is null or live.
+    match unsafe { handle.as_ref() }.map(|h| &h.result) {
+        Some(Ok(bytes)) => bytes.as_ptr(),
+        Some(Err(e)) => e.as_ptr(),
+        None => core::ptr::null(),
+    }
+}
+
+/// # Safety
+/// `handle` must be null or a live pointer from a function returning [`BytesResult`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bytes_result_len(handle: *const BytesResult) -> usize {
+    // SAFETY: caller guarantees `handle` is null or live.
+    match unsafe { handle.as_ref() }.map(|h| &h.result) {
+        Some(Ok(bytes)) => bytes.len(),
+        Some(Err(e)) => e.len(),
+        None => 0,
+    }
+}
+
+/// # Safety
+/// `handle` must come from a function returning [`BytesResult`] and not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bytes_result_free(handle: *mut BytesResult) {
+    if !handle.is_null() {
+        // SAFETY: caller guarantees ownership.
+        drop(unsafe { Box::from_raw(handle) });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn import_bytes(bytes: &[u8], ext: &str, rate: u32) -> *mut ImportResult {
+        let ptr = worker_alloc(bytes.len());
+        unsafe {
+            core::slice::from_raw_parts_mut(ptr, bytes.len()).copy_from_slice(bytes);
+            media_import(ptr, bytes.len(), ext.as_ptr(), ext.len(), rate)
+        }
+    }
+
+    #[test]
+    fn imports_through_the_abi() {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../media/tests/fixtures/tone-44k1-mono.wav"
+        ))
+        .unwrap();
+        let h = import_bytes(&bytes, "wav", 48_000);
+        unsafe {
+            assert_eq!(media_result_ok(h), 1);
+            assert_eq!(media_result_channels(h), 1);
+            assert_eq!(media_result_frames(h), 24_000);
+            assert_eq!(media_result_original_rate(h), 44_100);
+            assert!(!media_result_channel_ptr(h, 0).is_null());
+            assert!(media_result_channel_ptr(h, 1).is_null());
+            assert_eq!(media_result_peaks_len(h, 0), 24_000u32.div_ceil(256) * 2);
+            assert_eq!(media_result_error_len(h), 0);
+            media_result_free(h);
+        }
+    }
+
+    unsafe fn call(
+        f: unsafe extern "C" fn(*mut u8, usize) -> *mut BytesResult,
+        input: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        let ptr = worker_alloc(input.len());
+        unsafe {
+            core::slice::from_raw_parts_mut(ptr, input.len()).copy_from_slice(input);
+            let h = f(ptr, input.len());
+            let bytes =
+                core::slice::from_raw_parts(bytes_result_ptr(h), bytes_result_len(h)).to_vec();
+            let ok = bytes_result_ok(h) == 1;
+            bytes_result_free(h);
+            if ok {
+                Ok(bytes)
+            } else {
+                Err(String::from_utf8(bytes).unwrap())
+            }
+        }
+    }
+
+    #[test]
+    fn archives_round_trip_through_the_abi() {
+        let entries = vec![
+            ("project.json".to_string(), b"{}".to_vec()),
+            ("audio/a.wav".to_string(), vec![1, 2, 3]),
+        ];
+        unsafe {
+            let zip = call(archive_pack, &frame(&entries)).unwrap();
+            assert_eq!(
+                unframe(&call(archive_unpack, &zip).unwrap()).unwrap(),
+                entries
+            );
+            assert!(
+                call(archive_unpack, b"garbage")
+                    .unwrap_err()
+                    .contains("not a .tessera archive")
+            );
+            assert!(
+                call(archive_pack, &frame(&[("../x".into(), vec![])]))
+                    .unwrap_err()
+                    .contains("unsafe path")
+            );
+        }
+    }
+
+    #[test]
+    fn loads_projects_through_the_abi() {
+        unsafe {
+            let err = call(project_load, br#"{"schemaVersion": 99}"#).unwrap_err();
+            assert!(err.contains("newer version"), "{err}");
+            assert!(call(project_load, b"nope").is_err());
+        }
+    }
+
+    #[test]
+    fn reports_errors() {
+        let h = import_bytes(b"nope", "", 48_000);
+        unsafe {
+            assert_eq!(media_result_ok(h), 0);
+            assert_eq!(media_result_channels(h), 0);
+            let msg =
+                core::slice::from_raw_parts(media_result_error_ptr(h), media_result_error_len(h));
+            assert!(core::str::from_utf8(msg).unwrap().contains("unsupported"));
+            media_result_free(h);
+            worker_free(worker_alloc(10), 10);
+        }
+    }
+}

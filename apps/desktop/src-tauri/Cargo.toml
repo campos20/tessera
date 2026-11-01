@@ -18,7 +18,11 @@ assert_no_alloc = "1.1.2"
 engine-core = { version = "0.1.0", path = "../../../crates/engine-core", features = ["serde"] }
 engine-native = { version = "0.1.0", path = "../../../crates/engine-native" }
 media = { version = "0.1.0", path = "../../../crates/media" }
+project = { version = "0.1.0", path = "../../../crates/project" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
 tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
 
 [lints]
 workspace = true

@@ -48,6 +48,23 @@ export interface GridLine {
 const MIN_LINE_PX = 7;
 const MIN_LABEL_PX = 48;
 
+/** Spacing of the finest grid lines drawn at this zoom; edits snap to it. */
+export function gridStep(view: View, meter: Meter): number {
+  const beat = framesPerBeat(meter);
+  const bar = framesPerBar(meter);
+  const pxPerBeat = beat / view.framesPerPx;
+  if (pxPerBeat / 4 >= MIN_LINE_PX) return beat / 4;
+  if (pxPerBeat / 2 >= MIN_LINE_PX) return beat / 2;
+  if (pxPerBeat >= MIN_LINE_PX) return beat;
+  let bars = 1;
+  while ((bar * bars) / view.framesPerPx < MIN_LINE_PX) bars *= 2;
+  return bar * bars;
+}
+
+export function snapToGrid(frame: number, step: number): number {
+  return Math.max(0, Math.round(Math.round(frame / step) * step));
+}
+
 /**
  * Grid lines visible in `[0, width)` px. Subdivides beats into 16ths when zoomed in, and
  * thins bars to every 2nd/4th/... bar when zoomed out.
@@ -55,17 +72,7 @@ const MIN_LABEL_PX = 48;
 export function gridLines(view: View, width: number, meter: Meter): GridLine[] {
   const beat = framesPerBeat(meter);
   const bar = framesPerBar(meter);
-  const pxPerBeat = beat / view.framesPerPx;
-
-  let step: number;
-  if (pxPerBeat / 4 >= MIN_LINE_PX) step = beat / 4;
-  else if (pxPerBeat / 2 >= MIN_LINE_PX) step = beat / 2;
-  else if (pxPerBeat >= MIN_LINE_PX) step = beat;
-  else {
-    let bars = 1;
-    while ((bar * bars) / view.framesPerPx < MIN_LINE_PX) bars *= 2;
-    step = bar * bars;
-  }
+  const step = gridStep(view, meter);
   let labelBars = 1;
   while ((bar * labelBars) / view.framesPerPx < MIN_LABEL_PX) labelBars *= 2;
 

@@ -5,10 +5,9 @@ import type {
   EngineEventListener,
   EngineInfo,
   PlatformCapabilities,
+  ProjectStorage,
 } from "../index";
 import { decodeEvent, encodeCommand } from "./codec";
-import type { DecodeRequest, DecodeResponse } from "./decodeWorker";
-import { extensionOf } from "./mediaWasm";
 import { MessageRing } from "./messageRing";
 import {
   PROCESSOR_NAME,
@@ -17,6 +16,9 @@ import {
   type WorkletReply,
   type WorkletRequest,
 } from "./protocol";
+import { OpfsStorage } from "./storage";
+import { WorkerClient } from "./workerClient";
+import { extensionOf } from "./workerWasm";
 import wasmUrl from "./engine.wasm?url";
 import workletUrl from "./worklet.ts?worker&url";
 
@@ -48,9 +50,9 @@ export class WebPlatform implements AudioPlatform {
 
   private nextSeq = 1;
   private readonly workletRequests = new Map<number, Pending<void>>();
-  private decoder: Worker | undefined;
-  private readonly decodeRequests = new Map<number, Pending<DecodeResponse & { ok: true }>>();
+  private readonly worker = new WorkerClient();
   private nextSourceId = 1;
+  readonly storage: ProjectStorage = new OpfsStorage(this.worker);
 
   async start(): Promise<EngineInfo> {
     await this.init();
@@ -75,12 +77,11 @@ export class WebPlatform implements AudioPlatform {
     await this.init();
     const sampleRate = this.ctx!.sampleRate;
     const id = this.nextSourceId++;
-    const decoded = await this.decode({
-      id,
-      bytes: await file.arrayBuffer(),
-      extension: extensionOf(file.name),
-      targetRate: sampleRate,
-    });
+    const bytes = await file.arrayBuffer();
+    const decoded = await this.worker.call(
+      { kind: "decode", bytes, extension: extensionOf(file.name), targetRate: sampleRate },
+      [bytes],
+    );
 
     const { channels, frames } = decoded;
     await this.request({ type: "source-begin", id, channels: channels.length, frames });
@@ -215,23 +216,6 @@ export class WebPlatform implements AudioPlatform {
     this.workletRequests.delete(reply.seq);
     if (reply.ok) pending?.resolve();
     else pending?.reject(new Error(reply.error ?? "worklet request failed"));
-  }
-
-  private decode(request: DecodeRequest): Promise<DecodeResponse & { ok: true }> {
-    if (!this.decoder) {
-      this.decoder = new Worker(new URL("./decodeWorker.ts", import.meta.url), { type: "module" });
-      this.decoder.onmessage = (e: MessageEvent<DecodeResponse>) => {
-        const response = e.data;
-        const pending = this.decodeRequests.get(response.id);
-        this.decodeRequests.delete(response.id);
-        if (response.ok) pending?.resolve(response);
-        else pending?.reject(new Error(response.error));
-      };
-    }
-    return new Promise((resolve, reject) => {
-      this.decodeRequests.set(request.id, { resolve, reject });
-      this.decoder!.postMessage(request, [request.bytes]);
-    });
   }
 
   /** Delivers engine events from the worklet's ring, once per animation frame. */

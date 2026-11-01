@@ -1,5 +1,5 @@
 import { TauriPlatform } from "@tessera/platform/tauri";
-import { App, Testbench } from "@tessera/ui";
+import { App } from "@tessera/ui";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -7,11 +7,6 @@ const platform = new TauriPlatform();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    {/* M2 in progress: `?view=shell` previews the new DAW shell; the testbench stays the default until it is wired up. */}
-    {new URLSearchParams(location.search).get("view") === "shell" ? (
-      <App platform={platform} />
-    ) : (
-      <Testbench platform={platform} />
-    )}
+    <App platform={platform} />
   </StrictMode>,
 );
