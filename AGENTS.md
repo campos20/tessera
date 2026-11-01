@@ -108,7 +108,7 @@ packages/schema        generated TS types
     glitch-free in the web edition on a mid-range laptop.
   - Decisions: decoding lives in `crates/media`; the web edition stays on stable Rust, so decoded
     audio is copied into the worklet's WASM memory in chunks at import time, never in `process()`.
-- [ ] **M2** Timeline UI and projects: arrange view, undo/redo, save/load, `.tessera` zip, migrations.
+- [x] **M2** Timeline UI and projects: arrange view, undo/redo, save/load, `.tessera` zip, migrations.
   - Accept: create, edit, save, reload and continue editing a project in both editions; a
     Playwright E2E test covers the web flow.
   - Decisions: timeline positions are frames at a fixed 48 kHz project rate (`crates/project`),
