@@ -22,7 +22,20 @@ export type WorkletRequest =
   | { type: "source-begin"; seq: number; id: number; channels: number; frames: number }
   | { type: "source-chunk"; seq: number; id: number; offset: number; data: Float32Array[] }
   | { type: "source-end"; seq: number; id: number }
-  | { type: "gc"; seq: number };
+  | { type: "gc"; seq: number }
+  /** Creates a device's DSP state (allocates, so never inside `process()`). */
+  | { type: "device"; seq: number; id: number; kind: number }
+  | {
+      type: "automation";
+      seq: number;
+      lane: number;
+      track: number;
+      kind: number;
+      index: number;
+      device: number;
+      /** `[frame, value]` pairs, flattened. */
+      points: Float64Array;
+    };
 
 /** Worklet → main thread port messages. */
 export type WorkletReply = { type: "ready" } | { type: "ack"; seq: number; ok: boolean; error?: string };

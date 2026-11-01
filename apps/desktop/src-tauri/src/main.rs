@@ -158,6 +158,36 @@ fn audio_send(state: State<'_, AudioState>, command: Command) -> Result<(), Stri
         .map_err(|c| format!("command queue full, dropped {c:?}"))
 }
 
+/// Sets automation lane `lane` (see `engine_core::automation::AutomationTarget::from_parts`
+/// for `kind`, `index` and `device`); `points` are `[frame, value]` at the engine rate, and
+/// none removes the lane.
+#[tauri::command]
+fn audio_automation(
+    state: State<'_, AudioState>,
+    lane: u32,
+    track: u32,
+    kind: u32,
+    index: u32,
+    device: u32,
+    points: Vec<[f64; 2]>,
+) -> Result<(), String> {
+    let target = engine_core::automation::AutomationTarget::from_parts(kind, index, device)
+        .ok_or("unknown automation target")?;
+    let envelope = engine_core::automation::Envelope::new(
+        points
+            .iter()
+            .filter(|p| p[0].is_finite() && p[0] >= 0.0)
+            .map(|p| (p[0] as u64, p[1] as f32)),
+    );
+    let mut output = state.lock();
+    let output = output.as_mut().ok_or("audio engine not started")?;
+    if output.set_automation(lane, track, target, envelope) {
+        Ok(())
+    } else {
+        Err("command queue full".into())
+    }
+}
+
 #[tauri::command]
 fn audio_info(state: State<'_, AudioState>) -> Option<AudioInfo> {
     state.lock().as_ref().map(|o| o.info().clone())
@@ -290,6 +320,7 @@ fn main() {
             recording_end,
             measure_latency,
             audio_send,
+            audio_automation,
             audio_info,
             list_devices,
             import_audio,

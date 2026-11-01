@@ -18,6 +18,17 @@ export interface EngineExports {
   tessera_source_commit(handle: number, pending: number, source: number): number;
   tessera_source_discard(pending: number): void;
   tessera_collect_garbage(handle: number): number;
+  tessera_device_create(handle: number, device: number, kind: number): number;
+  tessera_automation_points(handle: number, points: number): number;
+  tessera_automation_commit(
+    handle: number,
+    points: number,
+    lane: number,
+    track: number,
+    kind: number,
+    index: number,
+    device: number,
+  ): number;
 }
 
 /** Instantiates the engine module. It has no imports, so this works synchronously. */

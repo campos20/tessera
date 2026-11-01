@@ -143,6 +143,24 @@ packages/schema        generated TS types
     bottom pane in `packages/ui/src/tune`, editing through the undoable store; the renderer sits
     behind `tune::PitchRenderer` so better algorithms can replace PSOLA later.
 - [ ] **M5** Mixer, built-in effects, automation.
+  - Accept: a 12-track session can be mixed in the web edition with built-ins only (track and
+    master inserts, sends to effect buses, automation); the same session renders within −90 dB
+    at buffer sizes 64, 128, 333 and 1024 and matches a golden file; no allocations on the audio
+    thread while devices, routing and automation change at random; each device has a DSP test
+    (EQ within 0.1 dB of its analytic curve, compressor static curve, limiter ceiling, gate,
+    delay timing, reverb decay time); the 12-track session renders ≥ 10× real time in
+    `engine.wasm`; a Playwright test adds an EQ, automates volume, hears it, undoes and reloads.
+  - Decisions: built-in devices live in `engine-core/src/devices`, are described by static
+    parameter tables (generated to `schema/devices.ts`) and take plain values (dB, Hz, ms);
+    device DSP state is allocated off the audio thread (`EngineController::send` for
+    `AddDevice`; on the web the worklet's message handler) and the engine accepts it before or
+    after its command; all built-ins have zero latency (no delay compensation until M7);
+    any track can be a bus target, buses are tracks without clips (`kind: "bus"`), routing loops
+    fall back to the master; sends are post-fader unless `pre`; master inserts are before the
+    master fader; automation is read-only breakpoint lanes with linear ramps: volume, pan and
+    sends follow them per sample, device parameters every 32 frames on a grid counted from the
+    engine's first frame, so renders don't depend on the buffer size; project schema v4 adds
+    `kind`, `output`, `sends`, `inserts` and `automation` to tracks and `masterInserts`.
 - [ ] **M6** MIDI: piano roll, synth/sampler, MIDI I/O, export Tune notes as MIDI.
 - [ ] **M7** Desktop plugin hosting (VST3 + CLAP), out-of-process scanner.
 - [ ] **M8** Export, polish, signed installers, web deployment.

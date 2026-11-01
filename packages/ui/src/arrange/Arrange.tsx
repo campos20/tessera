@@ -1,4 +1,11 @@
-import type { Clip, Project } from "@tessera/schema";
+import {
+  type Clip,
+  DEVICES,
+  type DeviceKind,
+  type LaneTarget,
+  type Project,
+  type Track,
+} from "@tessera/schema";
 import {
   type DragEvent,
   type PointerEvent,
@@ -12,7 +19,10 @@ import { useElementSize } from "../hooks/useElementSize";
 import { usePlayhead } from "../hooks/usePlayhead";
 import { SILENT } from "../Meter";
 import {
+  addPoint,
   addTrack,
+  ensureLane,
+  findLane,
   moveClips,
   removeTrack,
   moveTrack,
@@ -23,6 +33,7 @@ import {
   updateTrack,
 } from "../model/edits";
 import { useProject, useRecording, useSession, useTransport } from "../state/hooks";
+import { AutomationLane, LaneHeader, laneScale } from "./AutomationLane";
 import { CURSORS, type ClipPart, hitTestClip } from "./hitTest";
 import { Ruler } from "./Ruler";
 import {
@@ -60,6 +71,10 @@ interface ClipDrag {
   startX: number;
   startY: number;
   startFrame: number;
+  /** Row of the clip's track when the drag started. */
+  startRow: number;
+  /** Row offset under the pointer (kept while it is over something that isn't a track). */
+  rows: number;
   moved: boolean;
 }
 
@@ -149,6 +164,16 @@ export function Arrange({ view, onView, snap }: ArrangeProps) {
     else s.commitGesture();
   };
 
+  /** Shows (creating if needed) an automation lane, starting flat at the current value. */
+  const showLane = (track: Track, target: LaneTarget) =>
+    store.getState().edit("Show automation", (p) => {
+      const id = ensureLane(p, track.id, target);
+      const lane = id === undefined ? undefined : findLane(p, id)?.lane;
+      if (!lane || lane.points.length > 0) return;
+      const current = currentValue(track, target);
+      if (current !== undefined) addPoint(p, lane.id, 0, current);
+    });
+
   // Clip gestures ----------------------------------------------------------------------------
 
   const onLanePointerDown = (e: PointerEvent<HTMLCanvasElement>, trackId: number) => {
@@ -183,6 +208,8 @@ export function Arrange({ view, onView, snap }: ArrangeProps) {
       startX: e.clientX,
       startY: e.clientY,
       startFrame: xToFrame(x, view),
+      startRow: project.tracks.indexOf(track),
+      rows: 0,
       moved: false,
     };
   };
@@ -210,7 +237,11 @@ export function Arrange({ view, onView, snap }: ArrangeProps) {
     switch (d.kind) {
       case "body": {
         const start = snapFrame(clip.start + dx * view.framesPerPx, bypassSnap);
-        s.updateGesture((p) => moveClips(p, ids, start - clip.start, Math.round(dy / TRACK_HEIGHT)));
+        // Rows come from the element under the pointer: automation lanes make rows uneven.
+        const row = trackRowAt(e.clientX, e.clientY);
+        if (row !== undefined) d.rows = row - d.startRow;
+        const rows = d.rows;
+        s.updateGesture((p) => moveClips(p, ids, start - clip.start, rows));
         break;
       }
       case "trim-start":
@@ -261,10 +292,11 @@ export function Arrange({ view, onView, snap }: ArrangeProps) {
     const files = [...e.dataTransfer.files];
     if (files.length === 0 || !scroller.current) return;
     const rect = scroller.current.getBoundingClientRect();
-    const row = Math.floor((e.clientY - rect.top + scroller.current.scrollTop) / TRACK_HEIGHT);
+    const row = trackRowAt(e.clientX, e.clientY) ?? project.tracks.length;
     const x = e.clientX - rect.left - HEADER_WIDTH;
     const start = x > 0 ? snapFrame(xToFrame(x, view), false) : 0;
-    void session.importFiles(files, { trackId: project.tracks[row]?.id, start });
+    const target = project.tracks[row];
+    void session.importFiles(files, { trackId: target?.kind === "audio" ? target.id : undefined, start });
   };
 
   return (
@@ -319,43 +351,67 @@ export function Arrange({ view, onView, snap }: ArrangeProps) {
           }}
         >
           {project.tracks.map((track, i) => (
-            <div className="track-row" key={track.id}>
-              <TrackHeader
-                track={track}
-                height={TRACK_HEIGHT}
-                meter={meters.get(track.id) ?? SILENT}
-                selected={selection.track === track.id}
-                onChange={(patch, phase, label) => changeTrack(track.id, patch, phase, label)}
-                onSelect={() => store.getState().select({ track: track.id })}
-                onReorder={(rows, phase) => reorderTrack(track.id, i, rows, phase)}
-                armed={armed.has(track.id)}
-                monitored={monitored.has(track.id)}
-                inputMeter={inputMeters.get(track.id) ?? SILENT}
-                inputChannels={inputChannels}
-                onArm={() => void session.toggleArm(track.id)}
-                onMonitor={() => void session.toggleMonitor(track.id)}
-                onInput={(channel, stereo) => session.setTrackInput(track.id, channel, stereo)}
-                onDelete={() => store.getState().edit("Delete track", (p) => removeTrack(p, track.id))}
-              />
-              <TrackLane
-                track={track}
-                width={laneWidth}
-                height={TRACK_HEIGHT}
-                view={view}
-                grid={grid}
-                peaks={peaks}
-                selected={selection.clips}
-                loop={project.loop}
-                alternate={i % 2 === 1}
-                live={live.get(track.id)}
-                onPointerDown={(e) => onLanePointerDown(e, track.id)}
-                onPointerMove={(e) => onLanePointerMove(e, track.id)}
-                onPointerUp={onLanePointerUp}
-                onDoubleClick={(e) => {
-                  const hit = hitTestClip(track, view, e.nativeEvent.offsetX, e.nativeEvent.offsetY);
-                  if (hit?.part === "body") void session.openTune(hit.clip.id);
-                }}
-              />
+            <div className="track-group" key={track.id}>
+              <div className="track-row" data-track-row={i}>
+                <TrackHeader
+                  track={track}
+                  height={TRACK_HEIGHT}
+                  meter={meters.get(track.id) ?? SILENT}
+                  selected={selection.track === track.id}
+                  onChange={(patch, phase, label) => changeTrack(track.id, patch, phase, label)}
+                  onSelect={() => store.getState().select({ track: track.id })}
+                  onReorder={(rows, phase) => reorderTrack(track.id, i, rows, phase)}
+                  armed={armed.has(track.id)}
+                  monitored={monitored.has(track.id)}
+                  inputMeter={inputMeters.get(track.id) ?? SILENT}
+                  inputChannels={inputChannels}
+                  onArm={() => void session.toggleArm(track.id)}
+                  onMonitor={() => void session.toggleMonitor(track.id)}
+                  onInput={(channel, stereo) => session.setTrackInput(track.id, channel, stereo)}
+                  onDelete={() => store.getState().edit("Delete track", (p) => removeTrack(p, track.id))}
+                  automationTargets={automationTargets(track, project)}
+                  onShowLane={(target) => showLane(track, target)}
+                />
+                <TrackLane
+                  track={track}
+                  width={laneWidth}
+                  height={TRACK_HEIGHT}
+                  view={view}
+                  grid={grid}
+                  peaks={peaks}
+                  selected={selection.clips}
+                  loop={project.loop}
+                  alternate={i % 2 === 1}
+                  live={live.get(track.id)}
+                  onPointerDown={(e) => onLanePointerDown(e, track.id)}
+                  onPointerMove={(e) => onLanePointerMove(e, track.id)}
+                  onPointerUp={onLanePointerUp}
+                  onDoubleClick={(e) => {
+                    const hit = hitTestClip(track, view, e.nativeEvent.offsetX, e.nativeEvent.offsetY);
+                    if (hit?.part === "body") void session.openTune(hit.clip.id);
+                  }}
+                />
+              </div>
+              {track.automation
+                .filter((lane) => lane.visible)
+                .map((lane) => {
+                  const scale = laneScale(track, lane, project);
+                  if (!scale) return null;
+                  return (
+                    <div className="track-row lane-row" key={lane.id}>
+                      <LaneHeader lane={lane} scale={scale} width={HEADER_WIDTH} />
+                      <AutomationLane
+                        track={track}
+                        lane={lane}
+                        scale={scale}
+                        width={laneWidth}
+                        view={view}
+                        grid={grid}
+                        snapFrame={snapFrame}
+                      />
+                    </div>
+                  );
+                })}
             </div>
           ))}
           {project.tracks.length === 0 && (
@@ -384,4 +440,51 @@ const GESTURE_LABELS: Record<ClipPart | "gain", string> = {
 function addTrackAfter(p: Project, selectedTrack: number | undefined) {
   const index = p.tracks.findIndex((t) => t.id === selectedTrack);
   return addTrack(p, undefined, index >= 0 ? index + 1 : p.tracks.length);
+}
+
+/** Index of the track row under a viewport point, if any. */
+function trackRowAt(x: number, y: number): number | undefined {
+  const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-track-row]");
+  return el ? Number(el.dataset.trackRow) : undefined;
+}
+
+/** Everything on a track that an automation lane can drive. */
+function automationTargets(track: Track, project: Project): { label: string; target: LaneTarget }[] {
+  const out: { label: string; target: LaneTarget }[] = [
+    { label: "Volume", target: { kind: "volume" } },
+    { label: "Pan", target: { kind: "pan" } },
+  ];
+  for (const send of track.sends) {
+    const bus = project.tracks.find((t) => t.id === send.target);
+    out.push({ label: `Send → ${bus?.name ?? "?"}`, target: { kind: "send", send: send.id } });
+  }
+  for (const device of track.inserts) {
+    const info = DEVICES[device.kind as DeviceKind] as (typeof DEVICES)[DeviceKind] | undefined;
+    for (const param of info?.params ?? []) {
+      // EQ: frequencies and gains (the band switches and types aren't worth a lane).
+      if (device.kind === "eq" && !/Freq$|Gain$|^output$/.test(param.id)) continue;
+      out.push({
+        label: `${info!.name}: ${param.name}`,
+        target: { kind: "param", device: device.id, param: param.id },
+      });
+    }
+  }
+  return out;
+}
+
+function currentValue(track: Track, target: LaneTarget): number | undefined {
+  switch (target.kind) {
+    case "volume":
+      return track.gain;
+    case "pan":
+      return track.pan;
+    case "send":
+      return track.sends.find((s) => s.id === target.send)?.gain;
+    case "param": {
+      const device = track.inserts.find((d) => d.id === target.device);
+      const info = device && (DEVICES[device.kind as DeviceKind] as (typeof DEVICES)[DeviceKind] | undefined);
+      const param = info?.params.find((x) => x.id === target.param);
+      return param && (device!.params[param.id] ?? param.default);
+    }
+  }
 }

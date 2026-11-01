@@ -10,6 +10,7 @@ import {
   useSession,
   useSessionUi,
   useTransport,
+  useTune,
 } from "../state/hooks";
 import { Session } from "../state/session";
 import { Meter } from "../Meter";
@@ -17,6 +18,7 @@ import { AudioSettings } from "./AudioSettings";
 import { StatusBar } from "./StatusBar";
 import { TransportBar } from "./TransportBar";
 import { TuneEditor } from "../tune/TuneEditor";
+import { Mixer } from "../mixer/Mixer";
 import "../theme.css";
 import "./App.css";
 
@@ -43,7 +45,16 @@ function Workspace() {
   const [view, setView] = useState<View>({ framesPerPx: 1200, scrollFrames: 0 });
   const [snap, setSnap] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  useShortcuts(setView, () => setSnap((s) => !s));
+  const [mixer, setMixer] = useState(false);
+  const tuning = useTune((s) => s.editing !== undefined);
+  const toggleMixer = () => {
+    // The mixer and Tune share the bottom pane: showing the mixer closes Tune.
+    if (tuning) {
+      session.closeTuneEditor();
+      setMixer(true);
+    } else setMixer((m) => !m);
+  };
+  useShortcuts(setView, () => setSnap((s) => !s), toggleMixer);
 
   return (
     <div className="app">
@@ -52,9 +63,12 @@ function Workspace() {
         snap={snap}
         onToggleSnap={() => setSnap((s) => !s)}
         onZoom={(f) => setView((v) => zoomAround(v, f, 0))}
+        mixer={mixer && !tuning}
+        onToggleMixer={toggleMixer}
       />
       <Arrange view={view} onView={setView} snap={snap} />
       <TuneEditor />
+      {mixer && !tuning && <Mixer onClose={() => setMixer(false)} />}
       <Footer onError={() => session.reportError(undefined)} />
       {settingsOpen && <AudioSettings onClose={() => setSettingsOpen(false)} />}
     </div>
@@ -107,7 +121,11 @@ function Footer({ onError }: { onError: () => void }) {
 }
 
 /** Keyboard shortcuts (ignored while typing in a field). */
-function useShortcuts(setView: (update: (v: View) => View) => void, toggleSnap: () => void) {
+function useShortcuts(
+  setView: (update: (v: View) => View) => void,
+  toggleSnap: () => void,
+  toggleMixer: () => void,
+) {
   const session = useSession();
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -151,6 +169,7 @@ function useShortcuts(setView: (update: (v: View) => View) => void, toggleSnap: 
         else if (!mod && key === "l") s.edit("Loop", (p) => void (p.loop.enabled = !p.loop.enabled));
         else if (!mod && key === "c") s.edit("Metronome", (p) => void (p.metronome = !p.metronome));
         else if (!mod && key === "n") toggleSnap();
+        else if (!mod && key === "x") toggleMixer();
         else if (key === "=" || key === "+") setView((v) => zoomAround(v, 1 / 1.5, playheadX(v)));
         else if (key === "-") setView((v) => zoomAround(v, 1.5, playheadX(v)));
         else return false;
@@ -162,7 +181,7 @@ function useShortcuts(setView: (update: (v: View) => View) => void, toggleSnap: 
       Math.max(0, (session.transport.getState().position - v.scrollFrames) / v.framesPerPx);
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [session, setView, toggleSnap]);
+  }, [session, setView, toggleSnap, toggleMixer]);
 }
 
 export { HEADER_WIDTH };

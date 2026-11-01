@@ -136,6 +136,18 @@ impl AudioIo {
         self.controller.send(command)
     }
 
+    /// See [`EngineController::set_automation`].
+    pub fn set_automation(
+        &mut self,
+        lane: u32,
+        track: u32,
+        target: engine_core::automation::AutomationTarget,
+        envelope: engine_core::automation::Envelope,
+    ) -> bool {
+        self.controller
+            .set_automation(lane, track, target, envelope)
+    }
+
     pub fn poll_event(&mut self) -> Option<Event> {
         self.controller.poll_event()
     }

@@ -1,7 +1,24 @@
-import type { Command } from "@tessera/schema";
+import type { AutomationTarget } from "@tessera/platform";
+import { type Command, DEVICES, MASTER_TRACK } from "@tessera/schema";
 import { produce } from "immer";
 import { describe, expect, it } from "vitest";
-import { addClip, addSource, addTrack, moveClips, newProject, updateTrack } from "../model/edits";
+import {
+  addClip,
+  addDevice,
+  addPoint,
+  addSend,
+  addSource,
+  addTrack,
+  ensureLane,
+  moveClips,
+  moveDevice,
+  newProject,
+  removeDevice,
+  removeTrack,
+  setOutput,
+  setParam,
+  updateTrack,
+} from "../model/edits";
 import { EngineSync } from "./engineSync";
 
 const SOURCE = {
@@ -14,14 +31,18 @@ const SOURCE = {
 
 function setup(engineRate = 48_000) {
   const sent: Command[] = [];
-  const sync = new EngineSync({ send: (c) => sent.push(c) }, engineRate);
+  const automation: [number, number, AutomationTarget, [number, number][]][] = [];
+  const sync = new EngineSync(
+    { send: (c) => sent.push(c), setAutomation: (...args) => automation.push(args) },
+    engineRate,
+  );
   const ids = { track: 0, source: 0, clip: 0 };
   const project = produce(newProject("p", "T", "now"), (p) => {
     ids.track = addTrack(p);
     ids.source = addSource(p, SOURCE);
     ids.clip = addClip(p, ids.track, ids.source, 96_000)!;
   });
-  return { sent, sync, ids, project };
+  return { sent, sync, ids, project, automation };
 }
 
 describe("EngineSync", () => {
@@ -166,5 +187,109 @@ describe("EngineSync with Tune", () => {
     sync.setTunePlan(ids.clip, undefined);
     expect(sent.filter((c) => c.type === "RemoveClip")).toHaveLength(3);
     expect(sent.at(-1)).toMatchObject({ type: "SetClip", clip: ids.clip, source: 7 });
+  });
+
+  it("mirrors insert chains: adds, parameters, bypass, reorder and removal", () => {
+    const { sent, sync, ids, project } = setup();
+    sync.sync(project);
+    sent.length = 0;
+    let eq = 0;
+    let comp = 0;
+    const p1 = produce(project, (p) => {
+      eq = addDevice(p, ids.track, "eq")!;
+      comp = addDevice(p, null, "compressor")!;
+      setParam(p, eq, "b1Gain", 30); // clamped to 24
+    });
+    sync.sync(p1);
+    expect(sent).toEqual([
+      { type: "AddDevice", device: comp, track: MASTER_TRACK, position: 0, kind: DEVICES.compressor.code },
+      { type: "AddDevice", device: eq, track: ids.track, position: 0, kind: DEVICES.eq.code },
+      { type: "SetDeviceParam", device: eq, param: 3, value: 24 },
+    ]);
+    sent.length = 0;
+    let lim = 0;
+    const p2 = produce(p1, (p) => {
+      lim = addDevice(p, ids.track, "limiter", 0)!;
+      p.tracks[0]!.inserts[1]!.bypass = true;
+    });
+    sync.sync(p2);
+    expect(sent).toEqual([
+      { type: "AddDevice", device: lim, track: ids.track, position: 0, kind: DEVICES.limiter.code },
+      { type: "MoveDevice", device: eq, track: ids.track, position: 1 },
+      { type: "SetDeviceBypass", device: eq, bypass: true },
+    ]);
+    sent.length = 0;
+    sync.sync(produce(p2, (p) => moveDevice(p, lim, 1)));
+    expect(sent).toEqual([
+      { type: "MoveDevice", device: eq, track: ids.track, position: 0 },
+      { type: "MoveDevice", device: lim, track: ids.track, position: 1 },
+    ]);
+    sent.length = 0;
+    sync.sync(produce(p2, (p) => removeDevice(p, eq)));
+    expect(sent).toContainEqual({ type: "RemoveDevice", device: eq });
+  });
+
+  it("routes outputs and sends, and clears them with their bus", () => {
+    const { sent, sync, ids, project } = setup();
+    sync.sync(project);
+    sent.length = 0;
+    let bus = 0;
+    const p1 = produce(project, (p) => {
+      bus = addTrack(p, undefined, undefined, "bus");
+      setOutput(p, ids.track, bus);
+      addSend(p, ids.track, bus, 0.25);
+      setOutput(p, bus, ids.track); // would loop: ignored
+    });
+    sync.sync(p1);
+    expect(sent).toContainEqual({ type: "SetTrackOutput", track: ids.track, output: bus });
+    expect(sent).toContainEqual({
+      type: "SetSend",
+      track: ids.track,
+      index: 0,
+      enabled: true,
+      target: bus,
+      gain: 0.25,
+      pre: false,
+    });
+    expect(sent.filter((c) => c.type === "SetTrackOutput")).toHaveLength(1);
+    sent.length = 0;
+    sync.sync(produce(p1, (p) => removeTrack(p, bus)));
+    expect(sent).toContainEqual({ type: "RemoveTrack", track: bus });
+    expect(sent).toContainEqual({ type: "SetTrackOutput", track: ids.track, output: MASTER_TRACK });
+    expect(sent).toContainEqual(expect.objectContaining({ type: "SetSend", index: 0, enabled: false }));
+  });
+
+  it("sends automation lanes at the engine rate and only when they change", () => {
+    const { sent, sync, ids, project, automation } = setup(44_100);
+    sync.sync(project);
+    let lane = 0;
+    let eq = 0;
+    const p1 = produce(project, (p) => {
+      lane = ensureLane(p, ids.track, { kind: "volume" })!;
+      addPoint(p, lane, 0, 1);
+      addPoint(p, lane, 48_000, 0.5);
+      eq = addDevice(p, ids.track, "eq")!;
+      const param = ensureLane(p, ids.track, { kind: "param", device: eq, param: "b2Freq" })!;
+      addPoint(p, param, 0, 500);
+    });
+    sync.sync(p1);
+    expect(automation).toEqual([
+      [
+        lane,
+        ids.track,
+        { kind: 0, index: 0, device: 0 },
+        [
+          [0, 1],
+          [44_100, 0.5],
+        ],
+      ],
+      [lane + 2, ids.track, { kind: 3, index: 7, device: eq }, [[0, 500]]],
+    ]);
+    automation.length = 0;
+    sync.sync(produce(p1, (p) => void (p.tempo = 90)));
+    expect(automation).toEqual([]);
+    sent.length = 0;
+    sync.sync(produce(p1, (p) => removeDevice(p, eq)));
+    expect(sent).toContainEqual({ type: "RemoveAutomation", lane: lane + 2 });
   });
 });

@@ -81,6 +81,11 @@ describe("hit testing", async () => {
     solo: false,
     inputChannel: 0,
     inputStereo: false,
+    kind: "audio" as const,
+    output: null,
+    sends: [],
+    inserts: [],
+    automation: [],
     clips: [
       {
         id: 5,

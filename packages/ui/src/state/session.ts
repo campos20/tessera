@@ -24,6 +24,8 @@ export interface TransportState {
   tracks: ReadonlyMap<number, MeterReading>;
   /** Input level per armed or monitored track. */
   inputs: ReadonlyMap<number, MeterReading>;
+  /** Gain reduction (dB) per dynamics device. */
+  reduction: ReadonlyMap<number, number>;
   /** Input is being captured right now. */
   recording: boolean;
   countingIn: boolean;
@@ -104,6 +106,7 @@ export class Session {
     reportedAt: 0,
     master: { peakL: 0, peakR: 0 },
     tracks: new Map(),
+    reduction: new Map(),
     inputs: new Map(),
     recording: false,
     countingIn: false,
@@ -872,6 +875,11 @@ export class Session {
         break;
       case "TrackMeter":
         this.transport.setState((s) => ({ tracks: new Map(s.tracks).set(event.track, event) }));
+        break;
+      case "DeviceMeter":
+        this.transport.setState((s) => ({
+          reduction: new Map(s.reduction).set(event.device, event.reduction),
+        }));
         break;
     }
   }

@@ -120,6 +120,16 @@ export type Diagnostics = Record<string, string | number | boolean>;
 export type EngineEventListener = (event: Event) => void;
 
 /**
+ * What an automation lane drives, as the engine encodes it: `kind` 0 = track volume,
+ * 1 = pan, 2 = send `index`, 3 = parameter `index` of `device`.
+ */
+export interface AutomationTarget {
+  kind: 0 | 1 | 2 | 3;
+  index: number;
+  device: number;
+}
+
+/**
  * Everything the UI may ask of the audio engine. The UI never imports Web Audio or Tauri
  * APIs directly; it only sees this interface.
  */
@@ -135,6 +145,11 @@ export interface AudioPlatform {
   start(): Promise<EngineInfo>;
   /** Sends a command to the engine. Commands sent before `start()` are queued. */
   send(command: Command): void;
+  /**
+   * Sets automation lane `lane` on `track`: breakpoints `[frame, value]` at the engine rate,
+   * ramping linearly. No points removes the lane. Ordered with `send`.
+   */
+  setAutomation(lane: number, track: number, target: AutomationTarget, points: [number, number][]): void;
   /** Subscribes to engine events. Returns an unsubscribe function. */
   onEvent(listener: EngineEventListener): () => void;
   /**

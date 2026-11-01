@@ -1,5 +1,11 @@
 import {
   type Clip,
+  DEVICES,
+  type Device,
+  type DeviceKind,
+  type Lane,
+  type LaneTarget,
+  MAX_SENDS,
   type Project,
   PROJECT_SAMPLE_RATE,
   SCHEMA_VERSION,
@@ -28,6 +34,7 @@ export function newProject(id: string, name: string, now: string): Project {
     metronome: false,
     loop: { enabled: false, start: 0, end: 4 * 96_000 },
     tracks: [],
+    masterInserts: [],
     sources: [],
     nextId: 1,
     createdAt: now,
@@ -57,11 +64,20 @@ export function findSource(p: Project, id: number): Source | undefined {
 
 // Tracks ---------------------------------------------------------------------------------------
 
-export function addTrack(p: Project, name?: string, index = p.tracks.length): number {
+export function addTrack(
+  p: Project,
+  name?: string,
+  index = p.tracks.length,
+  kind: Track["kind"] = "audio",
+): number {
   const id = takeId(p);
   p.tracks.splice(index, 0, {
     id,
-    name: name ?? `Track ${p.tracks.length + 1}`,
+    name:
+      name ??
+      (kind === "bus"
+        ? `Bus ${p.tracks.filter((t) => t.kind === "bus").length + 1}`
+        : `Track ${p.tracks.length + 1}`),
     color: trackColor(p.tracks.length),
     gain: 1,
     pan: 0,
@@ -69,13 +85,24 @@ export function addTrack(p: Project, name?: string, index = p.tracks.length): nu
     solo: false,
     inputChannel: 0,
     inputStereo: false,
+    kind,
+    output: null,
+    sends: [],
+    inserts: [],
+    automation: [],
     clips: [],
   });
   return id;
 }
 
+/** Removes a track, and every output and send that pointed at it. */
 export function removeTrack(p: Project, id: number) {
   p.tracks = p.tracks.filter((t) => t.id !== id);
+  for (const t of p.tracks) {
+    if (t.output === id) t.output = null;
+    const gone = t.sends.filter((s) => s.target === id).map((s) => s.id);
+    if (gone.length) removeSends(t, gone);
+  }
 }
 
 export function updateTrack(p: Project, id: number, patch: Partial<Omit<Track, "id" | "clips">>) {
@@ -102,7 +129,7 @@ export function addSource(p: Project, source: Omit<Source, "id">): number {
 export function addClip(p: Project, trackId: number, sourceId: number, start: number): number | undefined {
   const track = findTrack(p, trackId);
   const source = findSource(p, sourceId);
-  if (!track || !source) return undefined;
+  if (!track || !source || track.kind === "bus") return undefined;
   const id = takeId(p);
   track.clips.push({
     id,
@@ -141,9 +168,11 @@ export function moveClips(p: Project, ids: Iterable<number>, deltaFrames: number
     Math.min(p.tracks.length - 1 - Math.max(...rows), trackDelta),
   );
 
+  // Buses hold no clips: a move that would land any clip on one keeps every clip on its track.
+  const landsOnBus = found.some((_, i) => p.tracks[rows[i]! + rowDelta]!.kind === "bus");
   for (const [i, { track, clip }] of found.entries()) {
     clip.start += delta;
-    if (rowDelta !== 0) {
+    if (rowDelta !== 0 && !landsOnBus) {
       const target = p.tracks[rows[i]! + rowDelta]!;
       track.clips = track.clips.filter((c) => c.id !== clip.id);
       target.clips.push(clip);
@@ -259,4 +288,187 @@ function clampFades(clip: Clip) {
 
 function sortClips(track: Track) {
   track.clips.sort((a, b) => a.start - b.start || a.id - b.id);
+}
+
+// Mixer ----------------------------------------------------------------------------------------
+
+/** Whether routing `from` into bus `to` would create a loop (through outputs or sends). */
+export function wouldLoop(p: Project, from: number, to: number): boolean {
+  const seen = new Set<number>();
+  const visit = (id: number): boolean => {
+    if (id === from) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const t = findTrack(p, id);
+    if (!t) return false;
+    return (t.output !== null && visit(t.output)) || t.sends.some((s) => visit(s.target));
+  };
+  return visit(to);
+}
+
+/** Buses `trackId` may feed without creating a loop. */
+export function routableBuses(p: Project, trackId: number): Track[] {
+  return p.tracks.filter((t) => t.kind === "bus" && t.id !== trackId && !wouldLoop(p, trackId, t.id));
+}
+
+export function setOutput(p: Project, trackId: number, output: number | null) {
+  const track = findTrack(p, trackId);
+  if (!track || (output !== null && wouldLoop(p, trackId, output))) return;
+  track.output = output;
+}
+
+/** Adds a post-fader send to bus `target`; returns its id (undefined if not allowed). */
+export function addSend(p: Project, trackId: number, target: number, gain = 0.5): number | undefined {
+  const track = findTrack(p, trackId);
+  if (!track || track.sends.length >= MAX_SENDS || wouldLoop(p, trackId, target)) return undefined;
+  const id = takeId(p);
+  track.sends.push({ id, target, gain, pre: false });
+  return id;
+}
+
+function removeSends(track: Track, ids: number[]) {
+  track.sends = track.sends.filter((s) => !ids.includes(s.id));
+  track.automation = track.automation.filter(
+    (l) => !(l.target.kind === "send" && ids.includes(l.target.send)),
+  );
+}
+
+export function removeSend(p: Project, trackId: number, sendId: number) {
+  const track = findTrack(p, trackId);
+  if (track) removeSends(track, [sendId]);
+}
+
+/** The insert chain of a track, or of the master (`trackId` null). */
+export function chainOf(p: Project, trackId: number | null): Device[] | undefined {
+  return trackId === null ? p.masterInserts : findTrack(p, trackId)?.inserts;
+}
+
+export function addDevice(
+  p: Project,
+  trackId: number | null,
+  kind: DeviceKind,
+  index?: number,
+): number | undefined {
+  const chain = chainOf(p, trackId);
+  if (!chain) return undefined;
+  const id = takeId(p);
+  chain.splice(index ?? chain.length, 0, { id, kind, bypass: false, params: {} });
+  return id;
+}
+
+export function findDevice(
+  p: Project,
+  deviceId: number,
+): { device: Device; chain: Device[]; track: Track | null } | undefined {
+  const inMaster = p.masterInserts.find((d) => d.id === deviceId);
+  if (inMaster) return { device: inMaster, chain: p.masterInserts, track: null };
+  for (const track of p.tracks) {
+    const device = track.inserts.find((d) => d.id === deviceId);
+    if (device) return { device, chain: track.inserts, track };
+  }
+  return undefined;
+}
+
+/** Removes a device and the automation lanes of its parameters. */
+export function removeDevice(p: Project, deviceId: number) {
+  const found = findDevice(p, deviceId);
+  if (!found) return;
+  found.chain.splice(found.chain.indexOf(found.device), 1);
+  if (found.track)
+    found.track.automation = found.track.automation.filter(
+      (l) => !(l.target.kind === "param" && l.target.device === deviceId),
+    );
+}
+
+/** Moves a device within its chain (devices with automation stay on their track). */
+export function moveDevice(p: Project, deviceId: number, toIndex: number) {
+  const found = findDevice(p, deviceId);
+  if (!found) return;
+  const { chain, device } = found;
+  chain.splice(chain.indexOf(device), 1);
+  chain.splice(Math.max(0, Math.min(chain.length, toIndex)), 0, device);
+}
+
+/** Default of a device parameter (undefined for unknown kinds or ids). */
+export function paramInfo(kind: string, param: string) {
+  const info = DEVICES[kind as DeviceKind] as (typeof DEVICES)[DeviceKind] | undefined;
+  return info?.params.find((x) => x.id === param);
+}
+
+export function paramValue(device: Device, param: string): number {
+  return device.params[param] ?? paramInfo(device.kind, param)?.default ?? 0;
+}
+
+/** Sets a parameter (clamped); values equal to the default are dropped from the project. */
+export function setParam(p: Project, deviceId: number, param: string, value: number) {
+  const device = findDevice(p, deviceId)?.device;
+  const info = device && paramInfo(device.kind, param);
+  if (!device || !info) return;
+  let v = Math.min(info.max, Math.max(info.min, value));
+  if (info.scale === "choice" || info.scale === "toggle") v = Math.round(v);
+  if (v === info.default) delete device.params[param];
+  else device.params[param] = v;
+}
+
+// Automation -----------------------------------------------------------------------------------
+
+export function sameTarget(a: LaneTarget, b: LaneTarget): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "send" && b.kind === "send") return a.send === b.send;
+  if (a.kind === "param" && b.kind === "param") return a.device === b.device && a.param === b.param;
+  return true;
+}
+
+/** The lane for `target`, created (visible, empty) if the track has none. */
+export function ensureLane(p: Project, trackId: number, target: LaneTarget): number | undefined {
+  const track = findTrack(p, trackId);
+  if (!track) return undefined;
+  const existing = track.automation.find((l) => sameTarget(l.target, target));
+  if (existing) {
+    existing.visible = true;
+    return existing.id;
+  }
+  const id = takeId(p);
+  track.automation.push({ id, target, points: [], visible: true });
+  return id;
+}
+
+export function findLane(p: Project, laneId: number): { lane: Lane; track: Track } | undefined {
+  for (const track of p.tracks) {
+    const lane = track.automation.find((l) => l.id === laneId);
+    if (lane) return { lane, track };
+  }
+  return undefined;
+}
+
+/** Adds a point (replacing one at the same frame); returns its index after sorting. */
+export function addPoint(p: Project, laneId: number, frame: number, value: number): number {
+  const lane = findLane(p, laneId)?.lane;
+  if (!lane) return -1;
+  const f = Math.max(0, Math.round(frame));
+  lane.points = lane.points.filter((pt) => pt.frame !== f);
+  lane.points.push({ frame: f, value });
+  lane.points.sort((a, b) => a.frame - b.frame);
+  return lane.points.findIndex((pt) => pt.frame === f);
+}
+
+/** Moves point `index`, keeping it between its neighbours. */
+export function movePoint(p: Project, laneId: number, index: number, frame: number, value: number) {
+  const lane = findLane(p, laneId)?.lane;
+  const pt = lane?.points[index];
+  if (!lane || !pt) return;
+  const lo = lane.points[index - 1]?.frame ?? 0;
+  const hi = lane.points[index + 1]?.frame ?? Number.MAX_SAFE_INTEGER;
+  pt.frame = Math.max(lo, Math.min(hi, Math.round(frame)));
+  pt.value = value;
+}
+
+export function removePoint(p: Project, laneId: number, index: number) {
+  const lane = findLane(p, laneId)?.lane;
+  if (lane) lane.points.splice(index, 1);
+}
+
+export function removeLane(p: Project, laneId: number) {
+  const found = findLane(p, laneId);
+  if (found) found.track.automation = found.track.automation.filter((l) => l.id !== laneId);
 }

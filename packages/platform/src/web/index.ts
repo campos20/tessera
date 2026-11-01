@@ -11,6 +11,7 @@ import {
 import type {
   AudioPlatform,
   AudioSettings,
+  AutomationTarget,
   Diagnostics,
   EngineEventListener,
   EngineInfo,
@@ -73,6 +74,7 @@ export class WebPlatform implements AudioPlatform {
 
   private nextSeq = 1;
   private readonly workletRequests = new Map<number, Pending<void>>();
+  private beforeEngine: [WithoutSeq<WorkletRequest>, Transferable[]][] = [];
   private readonly worker = new WorkerClient();
   private nextSourceId = 1;
   private input: { stream: MediaStream; source: MediaStreamAudioSourceNode } | undefined;
@@ -215,6 +217,28 @@ export class WebPlatform implements AudioPlatform {
     if (!this.commandRing().push(op, this.commandArgs)) {
       console.warn("tessera: command ring full, dropped", command);
     }
+    // The worklet can't allocate in process(): device state is created from its message
+    // handler. The engine accepts it before or after the command.
+    if (command.type === "AddDevice") this.post({ type: "device", id: command.device, kind: command.kind });
+  }
+
+  setAutomation(lane: number, track: number, target: AutomationTarget, points: [number, number][]): void {
+    if (!globalThis.crossOriginIsolated) return;
+    const flat = new Float64Array(points.length * 2);
+    points.forEach(([f, v], i) => {
+      flat[i * 2] = f;
+      flat[i * 2 + 1] = v;
+    });
+    this.post({ type: "automation", lane, track, ...target, points: flat }, [flat.buffer]);
+  }
+
+  /** Requests the worklet doesn't acknowledge to anyone; queued until the engine exists. */
+  private post(message: WithoutSeq<WorkletRequest>, transfer: Transferable[] = []) {
+    if (!this.node) {
+      this.beforeEngine.push([message, transfer]);
+      return;
+    }
+    this.request(message, transfer).catch((e: unknown) => console.warn("tessera:", e));
   }
 
   onEvent(listener: EngineEventListener): () => void {
@@ -357,6 +381,7 @@ export class WebPlatform implements AudioPlatform {
       node.connect(ctx.destination);
       this.ctx = ctx;
       this.node = node;
+      for (const [message, transfer] of this.beforeEngine.splice(0)) this.post(message, transfer);
       this.events = events;
       await this.worker.call({ kind: "attachCapture", ring: capture.buffer, capacity: capture.capacity });
       this.worker.onEvent((e) => {

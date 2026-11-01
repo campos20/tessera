@@ -1,7 +1,7 @@
 // Exercises the real engine.wasm (built by `pnpm build:wasm`) through the same ABI and raw
 // encoding the worklet uses, so a mismatch between Rust and TypeScript fails here.
 import { readFileSync } from "node:fs";
-import { type Command, type Event, MAX_ARGS } from "@tessera/schema";
+import { type Command, DEVICES, type Event, MASTER_TRACK, MAX_ARGS } from "@tessera/schema";
 import { describe, expect, it } from "vitest";
 import { decodeEvent, encodeCommand } from "./codec";
 import { type EngineExports, instantiateEngine } from "./wasmEngine";
@@ -27,6 +27,24 @@ class TestEngine {
       );
     });
     expect(this.e.tessera_source_commit(this.h, pending, id)).toBe(1);
+  }
+
+  /** What the worklet's message handler does for `AddDevice` (state is created outside process()). */
+  createDevice(id: number, kind: number) {
+    expect(this.e.tessera_device_create(this.h, id, kind)).toBe(1);
+  }
+
+  automate(
+    lane: number,
+    track: number,
+    kind: 0 | 1 | 2 | 3,
+    index: number,
+    device: number,
+    points: [number, number][],
+  ) {
+    const ptr = this.e.tessera_automation_points(this.h, points.length);
+    new Float64Array(this.e.memory.buffer, ptr, points.length * 2).set(points.flat());
+    expect(this.e.tessera_automation_commit(this.h, points.length, lane, track, kind, index, device)).toBe(1);
   }
 
   /** Renders `frames` in worklet-sized quanta; returns planar [left, right]. */
@@ -132,5 +150,73 @@ describe("engine.wasm", () => {
     );
     // Loose bound so slow CI machines pass; a laptop is typically far above this.
     expect(factor).toBeGreaterThan(10);
+  });
+
+  it("runs devices whose state arrives through the message handler, and automation", () => {
+    const t = new TestEngine();
+    t.addSource(1, [new Float32Array(SR).fill(0.5)]);
+    t.send({ type: "AddTrack", track: 1 });
+    t.send(clip(1, 1, 1, SR));
+    t.send({ type: "AddDevice", device: 9, track: 1, position: 0, kind: DEVICES.utility.code });
+    t.send({ type: "SetDeviceParam", device: 9, param: 0, value: -6.0206 });
+    t.createDevice(9, DEVICES.utility.code);
+    t.automate(3, 1, 0, 0, 0, [
+      [0, 1],
+      [4800, 0],
+    ]);
+    t.send({ type: "Play" });
+    const [left] = t.render(4800);
+    // Utility gain (−6 dB, after its 5 ms glide) × the volume ramp from 1 to 0.
+    expect(left[2400]).toBeCloseTo(0.125, 4);
+    expect(left[4799]).toBeCloseTo(0.25 / 4800, 4);
+    t.send({ type: "RemoveAutomation", lane: 3 });
+    t.send({ type: "RemoveDevice", device: 9 });
+    t.render(QUANTUM);
+    expect(t.e.tessera_collect_garbage(t.h)).toBe(2);
+  });
+
+  it("mixes a 12-track session with effects at least 10× faster than real time", () => {
+    const t = new TestEngine();
+    const seconds = 10;
+    const frames = SR * seconds;
+    let id = 1000;
+    const device = (track: number, kind: keyof typeof DEVICES) => {
+      id++;
+      t.send({ type: "AddDevice", device: id, track, position: 99, kind: DEVICES[kind].code });
+      t.createDevice(id, DEVICES[kind].code);
+      return id;
+    };
+    t.send({ type: "AddTrack", track: 100 });
+    t.send({ type: "AddTrack", track: 101 });
+    const reverb = device(100, "reverb");
+    t.send({ type: "SetDeviceParam", device: reverb, param: 5, value: 1 });
+    const delay = device(101, "delay");
+    t.send({ type: "SetDeviceParam", device: delay, param: 3, value: 1 });
+    device(MASTER_TRACK, "limiter");
+    for (let track = 0; track < 12; track++) {
+      const samples = new Float32Array(frames);
+      const f = 110 * (track + 2);
+      for (let i = 0; i < frames; i++) samples[i] = 0.2 * Math.sin((2 * Math.PI * f * i) / SR);
+      t.addSource(track, [samples]);
+      t.send({ type: "AddTrack", track });
+      t.send(clip(track, track, track, frames));
+      t.send({ type: "SetSend", track, index: 0, enabled: true, target: 100, gain: 0.3, pre: false });
+      t.send({ type: "SetSend", track, index: 1, enabled: true, target: 101, gain: 0.2, pre: false });
+      const eq = device(track, "eq");
+      t.send({ type: "SetDeviceParam", device: eq, param: 10, value: 1 });
+      device(track, "compressor");
+      t.automate(track + 1, track, 0, 0, 0, [
+        [0, 0],
+        [frames, 1],
+      ]);
+    }
+    t.send({ type: "Play" });
+    t.render(QUANTUM * 10); // warm up
+    const start = performance.now();
+    const [left] = t.render(frames);
+    const elapsed = (performance.now() - start) / 1000;
+    expect(left.some((s) => Math.abs(s) > 0.05)).toBe(true);
+    expect(seconds / elapsed).toBeGreaterThan(10);
+    console.log(`12-track session: ${(seconds / elapsed).toFixed(1)}× real time`);
   });
 });

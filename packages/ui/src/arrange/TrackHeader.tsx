@@ -1,4 +1,4 @@
-import type { Track } from "@tessera/schema";
+import type { LaneTarget, Track } from "@tessera/schema";
 import { type ChangeEvent, type PointerEvent, useEffect, useRef, useState } from "react";
 import { Meter, type MeterReading } from "../Meter";
 import { TRACK_COLORS } from "../model/colors";
@@ -26,6 +26,9 @@ export interface TrackHeaderProps {
   onSelect: () => void;
   /** Dragging the header reorders tracks; `rows` is the offset from the starting row. */
   onReorder: (rows: number, phase: "start" | "move" | "end") => void;
+  /** What can be automated on this track (volume, pan, sends, device parameters). */
+  automationTargets: { label: string; target: LaneTarget }[];
+  onShowLane: (target: LaneTarget) => void;
 }
 
 const MIN_DB = -60;
@@ -113,15 +116,21 @@ export function TrackHeader(props: TrackHeaderProps) {
               {track.name}
             </span>
           )}
-          <button
-            className={armed ? "ms arm on" : "ms arm"}
-            aria-pressed={armed}
-            aria-label="Arm for recording"
-            title="Arm for recording"
-            onClick={props.onArm}
-          >
-            ●
-          </button>
+          {track.kind === "bus" ? (
+            <span className="bus-tag" title="Bus: mixes the tracks routed to it">
+              BUS
+            </span>
+          ) : (
+            <button
+              className={armed ? "ms arm on" : "ms arm"}
+              aria-pressed={armed}
+              aria-label="Arm for recording"
+              title="Arm for recording"
+              onClick={props.onArm}
+            >
+              ●
+            </button>
+          )}
           <button
             className={track.mute ? "ms mute on" : "ms mute"}
             aria-pressed={track.mute}
@@ -155,6 +164,8 @@ export function TrackHeader(props: TrackHeaderProps) {
               onMonitor={props.onMonitor}
               onInput={props.onInput}
               onDelete={props.onDelete}
+              automationTargets={props.automationTargets}
+              onShowLane={props.onShowLane}
             />
           )}
         </div>
@@ -210,6 +221,8 @@ function TrackMenu(p: {
   onMonitor: () => void;
   onInput: (channel: number, stereo: boolean) => void;
   onDelete: () => void;
+  automationTargets: { label: string; target: LaneTarget }[];
+  onShowLane: (target: LaneTarget) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const { onClose } = p;
@@ -229,26 +242,49 @@ function TrackMenu(p: {
   return (
     <div className="track-menu" ref={ref} role="menu" onPointerDown={(e) => e.stopPropagation()}>
       <label>
-        Input
+        Automation
         <select
-          value={`${p.track.inputChannel}:${p.track.inputStereo}`}
-          aria-label="Input"
+          value=""
+          aria-label="Show automation"
           onChange={(e) => {
-            const [channel, stereo] = e.target.value.split(":");
-            p.onInput(Number(channel), stereo === "true");
+            const target = p.automationTargets[Number(e.target.value)]?.target;
+            if (target) p.onShowLane(target);
+            p.onClose();
           }}
         >
-          {options.map((o) => (
-            <option key={`${o.channel}:${o.stereo}`} value={`${o.channel}:${o.stereo}`}>
-              {o.label}
+          <option value="">Show lane…</option>
+          {p.automationTargets.map((t, i) => (
+            <option key={i} value={i}>
+              {t.label}
             </option>
           ))}
         </select>
       </label>
-      <label>
-        <input type="checkbox" checked={p.monitored} onChange={p.onMonitor} aria-label="Monitor input" />
-        Monitor input
-      </label>
+      {p.track.kind === "audio" && (
+        <>
+          <label>
+            Input
+            <select
+              value={`${p.track.inputChannel}:${p.track.inputStereo}`}
+              aria-label="Input"
+              onChange={(e) => {
+                const [channel, stereo] = e.target.value.split(":");
+                p.onInput(Number(channel), stereo === "true");
+              }}
+            >
+              {options.map((o) => (
+                <option key={`${o.channel}:${o.stereo}`} value={`${o.channel}:${o.stereo}`}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <input type="checkbox" checked={p.monitored} onChange={p.onMonitor} aria-label="Monitor input" />
+            Monitor input
+          </label>
+        </>
+      )}
       <button
         className="danger"
         onClick={() => {

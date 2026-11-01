@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, RingBuffer};
 
+use crate::automation::{AutomationTarget, Cursor, Envelope};
+use crate::devices::{self, Device, DeviceKind, MAX_PARAMS, ProcessContext};
 use crate::metronome::Metronome;
 use crate::{AudioBuffer, Command, Event};
 
@@ -16,6 +18,19 @@ pub const EVENT_QUEUE_CAPACITY: usize = 4096;
 pub const CAPTURE_CHUNK_FRAMES: usize = BLOCK_FRAMES;
 /// Capture queue length in chunks: ~10 s of one armed track at 48 kHz before overrun.
 pub const CAPTURE_QUEUE_CAPACITY: usize = 2048;
+pub const MAX_DEVICES: usize = 512;
+/// Devices per insert chain (each track's, and the master's).
+pub const MAX_INSERTS: usize = 16;
+pub const MAX_SENDS: usize = 8;
+pub const MAX_LANES: usize = 2048;
+/// Device parameter automation is applied every `CONTROL_FRAMES`, counted from the first
+/// frame the engine rendered, so renders don't depend on the audio callback's buffer size.
+pub const CONTROL_FRAMES: usize = 32;
+/// Track id that addresses the master bus (device chains, track outputs).
+pub const MASTER_TRACK: u32 = u32::MAX;
+/// Device states that arrived before their `AddDevice` command (web: separate channels).
+const ORPHANS: usize = 64;
+const NO_LANE: u16 = u16::MAX;
 
 /// A slice of captured input for one armed track, stamped with the timeline frame of its
 /// first sample (before latency compensation). Consecutive chunks of a take have contiguous
@@ -46,25 +61,93 @@ enum Message {
         source: u32,
         buffer: Arc<AudioBuffer>,
     },
+    DeviceState {
+        device: u32,
+        kind: DeviceKind,
+        state: Box<dyn Device>,
+    },
+    Automation {
+        lane: u32,
+        track: u32,
+        target: AutomationTarget,
+        envelope: Box<Envelope>,
+    },
+}
+
+/// Heap data the audio thread is done with, handed back to be freed elsewhere.
+enum Garbage {
+    Buffer(#[allow(dead_code)] Arc<AudioBuffer>),
+    Device(#[allow(dead_code)] Box<dyn Device>),
+    Envelope(#[allow(dead_code)] Box<Envelope>),
 }
 
 /// The UI-thread half: sends commands and audio, receives events, frees released audio.
 pub struct EngineController {
+    sample_rate: f64,
     messages: Producer<Message>,
     events: Consumer<Event>,
-    garbage: Consumer<Arc<AudioBuffer>>,
+    garbage: Consumer<Garbage>,
     capture: Option<Consumer<CaptureChunk>>,
 }
 
 impl EngineController {
     /// Queues a command. Returns it back if the queue is full.
+    ///
+    /// `AddDevice` also creates the device's DSP state here (allocating, so never call this
+    /// from an audio callback; see [`EngineController::queue`]).
     pub fn send(&mut self, command: Command) -> Result<(), Command> {
+        self.queue(command)?;
+        if let Command::AddDevice { device, kind, .. } = command {
+            // If this fails the queue is full; the slot then just passes audio through.
+            self.create_device(device, kind);
+        }
+        Ok(())
+    }
+
+    /// Queues a command without allocating anything. Devices added this way stay silent
+    /// pass-throughs until [`EngineController::create_device`] provides their state.
+    pub fn queue(&mut self, command: Command) -> Result<(), Command> {
         self.messages
             .push(Message::Command(command))
             .map_err(|rtrb::PushError::Full(m)| match m {
                 Message::Command(c) => c,
-                Message::AddSource { .. } => unreachable!(),
+                _ => unreachable!(),
             })
+    }
+
+    /// Creates the DSP state of device `device` (a [`DeviceKind`] code) and hands it to the
+    /// audio thread. Allocates. Returns false for unknown kinds or a full queue.
+    pub fn create_device(&mut self, device: u32, kind: u32) -> bool {
+        let Some(kind) = DeviceKind::from_code(kind) else {
+            return false;
+        };
+        let state = devices::create(kind, self.sample_rate);
+        self.messages
+            .push(Message::DeviceState {
+                device,
+                kind,
+                state,
+            })
+            .is_ok()
+    }
+
+    /// Adds or replaces automation lane `lane` on `track` (frames at the engine rate). An
+    /// empty envelope removes the lane. Returns false if the queue is full.
+    pub fn set_automation(
+        &mut self,
+        lane: u32,
+        track: u32,
+        target: AutomationTarget,
+        envelope: Envelope,
+    ) -> bool {
+        self.messages
+            .push(Message::Automation {
+                lane,
+                track,
+                target,
+                envelope: Box::new(envelope),
+            })
+            .is_ok()
     }
 
     /// Hands decoded audio (already at the engine's sample rate) to the audio thread.
@@ -78,7 +161,7 @@ impl EngineController {
             .push(Message::AddSource { source, buffer })
             .map_err(|rtrb::PushError::Full(m)| match m {
                 Message::AddSource { buffer, .. } => buffer,
-                Message::Command(_) => unreachable!(),
+                _ => unreachable!(),
             })
     }
 
@@ -95,8 +178,8 @@ impl EngineController {
     /// Frees audio the engine has released. Call regularly from a non-audio thread.
     pub fn collect_garbage(&mut self) -> usize {
         let mut count = 0;
-        while let Ok(buffer) = self.garbage.pop() {
-            drop(buffer);
+        while let Ok(garbage) = self.garbage.pop() {
+            drop(garbage);
             count += 1;
         }
         count
@@ -136,12 +219,116 @@ impl MeterAcc {
     }
 }
 
+/// An ordered list of device slots (indices into `Engine::devices`).
+#[derive(Clone, Copy)]
+struct Chain {
+    slots: [u16; MAX_INSERTS],
+    len: usize,
+}
+
+impl Chain {
+    const EMPTY: Chain = Chain {
+        slots: [0; MAX_INSERTS],
+        len: 0,
+    };
+
+    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.slots[..self.len].iter().map(|&s| s as usize)
+    }
+
+    fn insert(&mut self, position: usize, slot: usize) -> bool {
+        if self.len == MAX_INSERTS {
+            return false;
+        }
+        let at = position.min(self.len);
+        self.slots.copy_within(at..self.len, at + 1);
+        self.slots[at] = slot as u16;
+        self.len += 1;
+        true
+    }
+
+    fn remove(&mut self, slot: usize) -> bool {
+        let Some(at) = self.slots[..self.len]
+            .iter()
+            .position(|&s| s as usize == slot)
+        else {
+            return false;
+        };
+        self.slots.copy_within(at + 1..self.len, at);
+        self.len -= 1;
+        true
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Send {
+    enabled: bool,
+    target: u32,
+    /// Resolved by `update_routing`; `None` when the target is missing or would loop.
+    target_slot: Option<usize>,
+    gain: f32,
+    current: f32,
+    pre: bool,
+}
+
+impl Send {
+    const OFF: Send = Send {
+        enabled: false,
+        target: 0,
+        target_slot: None,
+        gain: 0.0,
+        current: 0.0,
+        pre: false,
+    };
+}
+
+struct DeviceSlot {
+    id: u32,
+    kind: DeviceKind,
+    /// Track id owning the chain this device is in ([`MASTER_TRACK`] for the master).
+    owner: u32,
+    bypass: bool,
+    /// Values set by commands.
+    base: [f32; MAX_PARAMS],
+    /// Values last passed to the DSP.
+    applied: [f32; MAX_PARAMS],
+    /// Automation lane slot per parameter (`NO_LANE` when not automated).
+    lanes: [u16; MAX_PARAMS],
+    automated: bool,
+    /// Some `base` value changed since it was last applied.
+    dirty: bool,
+    state: Option<Box<dyn Device>>,
+}
+
+/// A device's state that arrived before its `AddDevice`: `(device, kind, state)`.
+type Orphan = (u32, DeviceKind, Box<dyn Device>);
+
+struct Lane {
+    id: u32,
+    track: u32,
+    target: AutomationTarget,
+    envelope: Box<Envelope>,
+    cursor: Cursor,
+}
+
 struct Track {
     id: u32,
     gain: f32,
     pan: f32,
     mute: bool,
     solo: bool,
+    /// Audible under the current solo state (soloed, or feeding/fed by a soloed track).
+    solo_audible: bool,
+    /// Bus track id this track feeds, or [`MASTER_TRACK`].
+    output: u32,
+    output_slot: Option<usize>,
+    sends: [Send; MAX_SENDS],
+    inserts: Chain,
+    volume_lane: Option<usize>,
+    pan_lane: Option<usize>,
+    send_lanes: [Option<usize>; MAX_SENDS],
+    /// Smoothed 0/1 audibility (mute/solo), for pre-fader sends.
+    audible_current: f32,
     /// Smoothed per-channel gains, including pan and mute/solo.
     current_l: f32,
     current_r: f32,
@@ -166,6 +353,15 @@ impl Track {
             pan: 0.0,
             mute: false,
             solo: false,
+            solo_audible: true,
+            output: MASTER_TRACK,
+            output_slot: None,
+            sends: [Send::OFF; MAX_SENDS],
+            inserts: Chain::EMPTY,
+            volume_lane: None,
+            pan_lane: None,
+            send_lanes: [None; MAX_SENDS],
+            audible_current: 1.0,
             current_l: 1.0,
             current_r: 1.0,
             snap: true,
@@ -198,17 +394,29 @@ impl Track {
         (l, r)
     }
 
+    /// Slots this track sends audio to (its output bus and send targets).
+    fn destinations(&self) -> impl Iterator<Item = usize> + '_ {
+        self.output_slot
+            .into_iter()
+            .chain(self.sends.iter().filter_map(|s| s.target_slot))
+    }
+
+    fn audible(&self, any_solo: bool) -> bool {
+        !self.mute && (!any_solo || self.solo_audible)
+    }
+
     /// Balance pan law: unity at the center, so an untouched track nulls against its source.
     fn targets(&self, any_solo: bool) -> (f32, f32) {
-        let audible = !self.mute && (!any_solo || self.solo);
-        if !audible {
+        if !self.audible(any_solo) {
             return (0.0, 0.0);
         }
-        (
-            self.gain * (1.0 - self.pan).min(1.0),
-            self.gain * (1.0 + self.pan).min(1.0),
-        )
+        pan_gains(self.gain, self.pan)
     }
+}
+
+#[inline]
+fn pan_gains(gain: f32, pan: f32) -> (f32, f32) {
+    (gain * (1.0 - pan).min(1.0), gain * (1.0 + pan).min(1.0))
 }
 
 #[derive(Clone, Copy)]
@@ -246,9 +454,24 @@ pub struct Engine {
     sample_rate: f64,
     messages: Consumer<Message>,
     events: Producer<Event>,
-    garbage: Producer<Arc<AudioBuffer>>,
+    garbage: Producer<Garbage>,
 
     tracks: Vec<Option<Track>>,
+    /// Track slots in processing order: every track before the buses it feeds.
+    order: Vec<u16>,
+    /// Scratch for `update_routing`.
+    indegree: Vec<u16>,
+    devices: Vec<Option<DeviceSlot>>,
+    orphans: Vec<Option<Orphan>>,
+    master_inserts: Chain,
+    lanes: Vec<Option<Lane>>,
+    /// One past the highest occupied lane slot.
+    lane_end: usize,
+    /// Frames rendered since the engine started (aligns the control-rate grid).
+    rendered: u64,
+    /// Routing or lane links changed; recomputed once after the queued messages are applied.
+    routing_dirty: bool,
+    lanes_dirty: bool,
     clips: Vec<Option<Clip>>,
     /// One past the highest occupied clip slot.
     clip_end: usize,
@@ -301,8 +524,8 @@ impl Engine {
         let sample_rate = f64::from(sample_rate);
         let (msg_tx, msg_rx) = RingBuffer::new(MESSAGE_QUEUE_CAPACITY);
         let (evt_tx, evt_rx) = RingBuffer::new(EVENT_QUEUE_CAPACITY);
-        // Every source slot can be released at most once per refill, so this rarely fills.
-        let (gc_tx, gc_rx) = RingBuffer::new(MAX_SOURCES * 2);
+        // Sized so it only fills if the UI stops collecting garbage.
+        let (gc_tx, gc_rx) = RingBuffer::new((MAX_SOURCES + MAX_DEVICES + MAX_LANES) * 2);
         let (cap_tx, cap_rx) = RingBuffer::new(CAPTURE_QUEUE_CAPACITY);
         let engine = Engine {
             sample_rate,
@@ -310,6 +533,16 @@ impl Engine {
             events: evt_tx,
             garbage: gc_tx,
             tracks: (0..MAX_TRACKS).map(|_| None).collect(),
+            order: Vec::with_capacity(MAX_TRACKS),
+            indegree: vec![0; MAX_TRACKS],
+            devices: (0..MAX_DEVICES).map(|_| None).collect(),
+            orphans: (0..ORPHANS).map(|_| None).collect(),
+            master_inserts: Chain::EMPTY,
+            lanes: (0..MAX_LANES).map(|_| None).collect(),
+            lane_end: 0,
+            rendered: 0,
+            routing_dirty: false,
+            lanes_dirty: false,
             clips: vec![None; MAX_CLIPS],
             clip_end: 0,
             sources: (0..MAX_SOURCES).map(|_| None).collect(),
@@ -346,6 +579,7 @@ impl Engine {
         (
             engine,
             EngineController {
+                sample_rate,
                 messages: msg_tx,
                 events: evt_rx,
                 garbage: gc_rx,
@@ -389,7 +623,26 @@ impl Engine {
             match message {
                 Message::Command(command) => self.apply(command),
                 Message::AddSource { source, buffer } => self.add_source(source, buffer),
+                Message::DeviceState {
+                    device,
+                    kind,
+                    state,
+                } => self.attach_device(device, kind, state),
+                Message::Automation {
+                    lane,
+                    track,
+                    target,
+                    envelope,
+                } => self.set_lane(lane, track, target, envelope),
             }
+        }
+        if self.routing_dirty {
+            self.routing_dirty = false;
+            self.update_routing();
+        }
+        if self.lanes_dirty {
+            self.lanes_dirty = false;
+            self.relink_lanes();
         }
         if channels == 0 {
             out.fill(0.0);
@@ -443,6 +696,7 @@ impl Engine {
                 self.transport_gain = 0.0;
             }
             self.advance_meters(n);
+            self.rendered += n as u64;
             done += n;
         }
         out[frames * channels..].fill(0.0);
@@ -585,27 +839,136 @@ impl Engine {
             }
         }
 
-        // Tracks → master.
-        for (slot, track) in self.tracks.iter_mut().enumerate() {
-            let Some(track) = track else { continue };
-            let (target_l, target_r) = track.targets(self.any_solo);
+        // Tracks in routing order (every track before the buses it feeds): inserts,
+        // pre-fader sends, fader and pan, then the output and post-fader sends.
+        let ctx = ProcessContext { tempo: self.tempo };
+        let timeline = Timeline {
+            position: self.position,
+            running,
+            rendered: self.rendered,
+        };
+        let any_solo = self.any_solo;
+        let Engine {
+            tracks,
+            order,
+            devices,
+            lanes,
+            track_buf,
+            ..
+        } = self;
+        for &slot in order.iter() {
+            let slot = slot as usize;
+            let Some(track) = tracks[slot].as_mut() else {
+                continue;
+            };
+            let base = slot * 2 * BLOCK_FRAMES;
+            {
+                let (buf_l, buf_r) =
+                    track_buf[base..base + 2 * BLOCK_FRAMES].split_at_mut(BLOCK_FRAMES);
+                run_chain(
+                    &track.inserts,
+                    devices,
+                    lanes,
+                    &mut buf_l[..n],
+                    &mut buf_r[..n],
+                    &timeline,
+                    &ctx,
+                );
+            }
+            let audible = if track.audible(any_solo) { 1.0 } else { 0.0 };
+
+            for (index, send) in track.sends.iter_mut().enumerate() {
+                let Some(dst) = send.target_slot.filter(|_| send.enabled && send.pre) else {
+                    continue;
+                };
+                let lane = track.send_lanes[index];
+                let (src_l, src_r, dst_l, dst_r) = pair(track_buf, slot, dst);
+                let mut gate = track.audible_current;
+                for i in 0..n {
+                    gate += (audible - gate) * k;
+                    let g = send.next(lane_value(lanes, lane, timeline.frame(i)), k) * gate;
+                    dst_l[i] += src_l[i] * g;
+                    dst_r[i] += src_r[i] * g;
+                }
+            }
+
+            // Automated gain and pan follow their envelopes exactly (envelopes are already
+            // ramps); only mute/solo changes are smoothed. Otherwise everything is smoothed.
+            let automated = track.volume_lane.is_some() || track.pan_lane.is_some();
+            let (fixed_l, fixed_r) = track.targets(any_solo);
             if track.snap {
-                (track.current_l, track.current_r) = (target_l, target_r);
+                (track.current_l, track.current_r) = (fixed_l, fixed_r);
+                track.audible_current = audible;
                 track.snap = false;
             }
-            let base = slot * 2 * BLOCK_FRAMES;
-            let (buf_l, buf_r) =
-                self.track_buf[base..base + 2 * BLOCK_FRAMES].split_at(BLOCK_FRAMES);
-            for i in 0..n {
-                track.current_l += (target_l - track.current_l) * k;
-                track.current_r += (target_r - track.current_r) * k;
-                let l = buf_l[i] * track.current_l;
-                let r = buf_r[i] * track.current_r;
-                track.meter.add(l, r);
-                master_l[i] += l;
-                master_r[i] += r;
+            {
+                let (buf_l, buf_r) =
+                    track_buf[base..base + 2 * BLOCK_FRAMES].split_at_mut(BLOCK_FRAMES);
+                for i in 0..n {
+                    track.audible_current += (audible - track.audible_current) * k;
+                    if automated {
+                        let frame = timeline.frame(i);
+                        let gain =
+                            lane_value(lanes, track.volume_lane, frame).unwrap_or(track.gain);
+                        let pan = lane_value(lanes, track.pan_lane, frame).unwrap_or(track.pan);
+                        let (l, r) = pan_gains(
+                            finite_or(gain, 0.0).clamp(0.0, 4.0),
+                            finite_or(pan, 0.0).clamp(-1.0, 1.0),
+                        );
+                        track.current_l = l * track.audible_current;
+                        track.current_r = r * track.audible_current;
+                    } else {
+                        track.current_l += (fixed_l - track.current_l) * k;
+                        track.current_r += (fixed_r - track.current_r) * k;
+                    }
+                    let l = buf_l[i] * track.current_l;
+                    let r = buf_r[i] * track.current_r;
+                    buf_l[i] = l;
+                    buf_r[i] = r;
+                    track.meter.add(l, r);
+                }
+            }
+
+            match track.output_slot {
+                Some(dst) => {
+                    let (src_l, src_r, dst_l, dst_r) = pair(track_buf, slot, dst);
+                    for i in 0..n {
+                        dst_l[i] += src_l[i];
+                        dst_r[i] += src_r[i];
+                    }
+                }
+                None => {
+                    let (src_l, src_r) =
+                        track_buf[base..base + 2 * BLOCK_FRAMES].split_at(BLOCK_FRAMES);
+                    for i in 0..n {
+                        master_l[i] += src_l[i];
+                        master_r[i] += src_r[i];
+                    }
+                }
+            }
+
+            for (index, send) in track.sends.iter_mut().enumerate() {
+                let Some(dst) = send.target_slot.filter(|_| send.enabled && !send.pre) else {
+                    continue;
+                };
+                let lane = track.send_lanes[index];
+                let (src_l, src_r, dst_l, dst_r) = pair(track_buf, slot, dst);
+                for i in 0..n {
+                    let g = send.next(lane_value(lanes, lane, timeline.frame(i)), k);
+                    dst_l[i] += src_l[i] * g;
+                    dst_r[i] += src_r[i] * g;
+                }
             }
         }
+        run_chain(
+            &self.master_inserts,
+            &mut self.devices,
+            &mut self.lanes,
+            master_l,
+            master_r,
+            &timeline,
+            &ctx,
+        );
 
         let metronome_l = &mut self.metronome_l[..n];
         let metronome_r = &mut self.metronome_r[..n];
@@ -686,6 +1049,23 @@ impl Engine {
             if track.overrun {
                 track.overrun = false;
                 let _ = self.events.push(Event::CaptureOverrun { track: track.id });
+            }
+        }
+        for d in self.devices.iter().flatten() {
+            if matches!(
+                d.kind,
+                DeviceKind::Compressor | DeviceKind::Gate | DeviceKind::Limiter
+            ) && let Some(state) = &d.state
+            {
+                let reduction = if d.bypass {
+                    0.0
+                } else {
+                    state.gain_reduction()
+                };
+                let _ = self.events.push(Event::DeviceMeter {
+                    device: d.id,
+                    reduction,
+                });
             }
         }
     }
@@ -771,10 +1151,17 @@ impl Engine {
                     && let Some(slot) = self.tracks.iter().position(Option::is_none)
                 {
                     self.tracks[slot] = Some(Track::new(track));
+                    self.routing_dirty = true;
                 }
             }
             Command::RemoveTrack { track } => {
                 if let Some(slot) = self.track_slot(track) {
+                    let chain = self.tracks[slot]
+                        .as_ref()
+                        .map_or(Chain::EMPTY, |t| t.inserts);
+                    for device in chain.iter() {
+                        self.free_device(device);
+                    }
                     self.tracks[slot] = None;
                     for clip in &mut self.clips[..self.clip_end] {
                         if clip.is_some_and(|c| c.track_slot == slot) {
@@ -782,7 +1169,8 @@ impl Engine {
                         }
                     }
                     self.update_clip_end();
-                    self.update_solo();
+                    self.routing_dirty = true;
+                    self.lanes_dirty = true;
                 }
             }
             Command::SetTrackGain { track, gain } => {
@@ -850,10 +1238,108 @@ impl Engine {
                     self.update_clip_end();
                 }
             }
+            Command::AddDevice {
+                device,
+                track,
+                position,
+                kind,
+            } => self.add_device(device, track, position as usize, kind),
+            Command::RemoveDevice { device } => {
+                if let Some(slot) = self.device_slot(device) {
+                    let owner = self.devices[slot]
+                        .as_ref()
+                        .map_or(MASTER_TRACK, |d| d.owner);
+                    if let Some(chain) = self.chain_mut(owner) {
+                        chain.remove(slot);
+                    }
+                    self.free_device(slot);
+                    self.lanes_dirty = true;
+                }
+            }
+            Command::MoveDevice {
+                device,
+                track,
+                position,
+            } => {
+                let Some(slot) = self.device_slot(device) else {
+                    return;
+                };
+                if self.chain_mut(track).is_none_or(|c| c.len == MAX_INSERTS) {
+                    return;
+                }
+                let owner = self.devices[slot]
+                    .as_ref()
+                    .map_or(MASTER_TRACK, |d| d.owner);
+                if let Some(chain) = self.chain_mut(owner) {
+                    chain.remove(slot);
+                }
+                if let Some(chain) = self.chain_mut(track) {
+                    chain.insert(position as usize, slot);
+                }
+                if let Some(d) = self.devices[slot].as_mut() {
+                    d.owner = track;
+                }
+            }
+            Command::SetDeviceBypass { device, bypass } => {
+                if let Some(d) = self.device_mut(device) {
+                    d.bypass = bypass;
+                }
+            }
+            Command::SetDeviceParam {
+                device,
+                param,
+                value,
+            } => {
+                if let Some(d) = self.device_mut(device)
+                    && let Some(info) = d.kind.params().get(param as usize)
+                {
+                    d.base[param as usize] = info.clamp(value);
+                    d.dirty = true;
+                }
+            }
+            Command::SetTrackOutput { track, output } => {
+                if let Some(t) = self.track_mut(track) {
+                    t.output = output;
+                    self.routing_dirty = true;
+                }
+            }
+            Command::SetSend {
+                track,
+                index,
+                enabled,
+                target,
+                gain,
+                pre,
+            } => {
+                if let Some(t) = self.track_mut(track)
+                    && let Some(send) = t.sends.get_mut(index as usize)
+                {
+                    if !send.enabled && enabled {
+                        send.current = 0.0;
+                    }
+                    send.enabled = enabled;
+                    send.target = target;
+                    send.gain = finite_or(gain, send.gain).clamp(0.0, 4.0);
+                    send.pre = pre;
+                    self.routing_dirty = true;
+                }
+            }
+            Command::RemoveAutomation { lane } => {
+                if let Some(slot) = self.lane_slot(lane) {
+                    if let Some(old) = self.lanes[slot].take() {
+                        self.release(Garbage::Envelope(old.envelope));
+                    }
+                    self.lane_end = self.lanes[..self.lane_end]
+                        .iter()
+                        .rposition(Option::is_some)
+                        .map_or(0, |i| i + 1);
+                    self.lanes_dirty = true;
+                }
+            }
             Command::RemoveSource { source } => {
                 if let Some(slot) = self.source_slot(source) {
                     if let Some((_, buffer)) = self.sources[slot].take() {
-                        self.release(buffer);
+                        self.release(Garbage::Buffer(buffer));
                     }
                     self.resolve_clips(source, None);
                 }
@@ -869,22 +1355,276 @@ impl Engine {
             Some(slot) => slot,
             None => {
                 // Table full: give the audio straight back.
-                self.release(buffer);
+                self.release(Garbage::Buffer(buffer));
                 return;
             }
         };
         if let Some((_, old)) = self.sources[slot].replace((source, buffer)) {
-            self.release(old);
+            self.release(Garbage::Buffer(old));
         }
         self.resolve_clips(source, Some(slot));
     }
 
-    /// Hands a buffer back to the UI side so it is never freed on the audio thread.
-    fn release(&mut self, buffer: Arc<AudioBuffer>) {
-        if let Err(rtrb::PushError::Full(buffer)) = self.garbage.push(buffer) {
+    /// Hands heap data back to the UI side so it is never freed on the audio thread.
+    fn release(&mut self, garbage: Garbage) {
+        if let Err(rtrb::PushError::Full(garbage)) = self.garbage.push(garbage) {
             // Only possible if the UI stops collecting garbage. Leaking beats freeing here.
-            std::mem::forget(buffer);
+            std::mem::forget(garbage);
         }
+    }
+
+    fn add_device(&mut self, device: u32, track: u32, position: usize, kind: u32) {
+        let Some(kind) = DeviceKind::from_code(kind) else {
+            return;
+        };
+        if let Some(old) = self.device_slot(device) {
+            let owner = self.devices[old].as_ref().map_or(MASTER_TRACK, |d| d.owner);
+            if let Some(chain) = self.chain_mut(owner) {
+                chain.remove(old);
+            }
+            self.free_device(old);
+        }
+        let Some(slot) = self.devices.iter().position(Option::is_none) else {
+            return;
+        };
+        if !self
+            .chain_mut(track)
+            .is_some_and(|c| c.insert(position, slot))
+        {
+            return;
+        }
+        let defaults = kind.defaults();
+        // Its state may have arrived first (the web edition sends it on another channel).
+        let state = self
+            .orphans
+            .iter_mut()
+            .find(|o| {
+                o.as_ref()
+                    .is_some_and(|(id, k, _)| *id == device && *k == kind)
+            })
+            .and_then(Option::take)
+            .map(|(_, _, state)| state);
+        self.devices[slot] = Some(DeviceSlot {
+            id: device,
+            kind,
+            owner: track,
+            bypass: false,
+            base: defaults,
+            applied: defaults,
+            lanes: [NO_LANE; MAX_PARAMS],
+            automated: false,
+            dirty: false,
+            state,
+        });
+        self.lanes_dirty = true;
+    }
+
+    fn attach_device(&mut self, device: u32, kind: DeviceKind, state: Box<dyn Device>) {
+        match self.device_slot(device) {
+            Some(slot) => {
+                let d = self.devices[slot].as_mut().expect("occupied slot");
+                if d.kind != kind {
+                    self.release(Garbage::Device(state));
+                    return;
+                }
+                // The new state starts from defaults; `update` sends what differs.
+                d.applied = kind.defaults();
+                d.dirty = true;
+                if let Some(old) = d.state.replace(state) {
+                    self.release(Garbage::Device(old));
+                }
+            }
+            None => {
+                let free = match self.orphans.iter().position(Option::is_none) {
+                    Some(i) => i,
+                    None => {
+                        // Drop the oldest unclaimed state.
+                        if let Some((_, _, old)) = self.orphans[0].take() {
+                            self.release(Garbage::Device(old));
+                        }
+                        self.orphans.rotate_left(1);
+                        ORPHANS - 1
+                    }
+                };
+                self.orphans[free] = Some((device, kind, state));
+            }
+        }
+    }
+
+    /// Releases a device's state and frees its slot (the caller removes it from its chain).
+    fn free_device(&mut self, slot: usize) {
+        if let Some(d) = self.devices[slot].take()
+            && let Some(state) = d.state
+        {
+            self.release(Garbage::Device(state));
+        }
+    }
+
+    fn set_lane(
+        &mut self,
+        lane: u32,
+        track: u32,
+        target: AutomationTarget,
+        envelope: Box<Envelope>,
+    ) {
+        let existing = self.lane_slot(lane);
+        if envelope.is_empty() {
+            self.release(Garbage::Envelope(envelope));
+            if let Some(slot) = existing
+                && let Some(old) = self.lanes[slot].take()
+            {
+                self.release(Garbage::Envelope(old.envelope));
+            }
+            self.lanes_dirty = true;
+            return;
+        }
+        let Some(slot) = existing.or_else(|| self.lanes.iter().position(Option::is_none)) else {
+            self.release(Garbage::Envelope(envelope));
+            return;
+        };
+        let new = Lane {
+            id: lane,
+            track,
+            target,
+            envelope,
+            cursor: Cursor::default(),
+        };
+        if let Some(old) = self.lanes[slot].replace(new) {
+            self.release(Garbage::Envelope(old.envelope));
+        }
+        self.lane_end = self.lane_end.max(slot + 1);
+        self.lanes_dirty = true;
+    }
+
+    /// Points tracks and devices at the lanes that automate them.
+    fn relink_lanes(&mut self) {
+        for t in self.tracks.iter_mut().flatten() {
+            t.volume_lane = None;
+            t.pan_lane = None;
+            t.send_lanes = [None; MAX_SENDS];
+        }
+        for d in self.devices.iter_mut().flatten() {
+            d.lanes = [NO_LANE; MAX_PARAMS];
+            d.automated = false;
+            // Parameters that lost their lane go back to their commanded value.
+            d.dirty = true;
+        }
+        for slot in 0..self.lane_end {
+            let Some(lane) = &self.lanes[slot] else {
+                continue;
+            };
+            let (track, target) = (lane.track, lane.target);
+            match target {
+                AutomationTarget::Param { device, param } => {
+                    if let Some(d) = self.device_mut(device)
+                        && (param as usize) < d.kind.params().len()
+                    {
+                        d.lanes[param as usize] = slot as u16;
+                        d.automated = true;
+                    }
+                }
+                _ => {
+                    let Some(t) = self.track_mut(track) else {
+                        continue;
+                    };
+                    match target {
+                        AutomationTarget::Volume => t.volume_lane = Some(slot),
+                        AutomationTarget::Pan => t.pan_lane = Some(slot),
+                        AutomationTarget::Send(i) => {
+                            if let Some(l) = t.send_lanes.get_mut(i as usize) {
+                                *l = Some(slot);
+                            }
+                        }
+                        AutomationTarget::Param { .. } => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Resolves outputs and sends to track slots and orders tracks so each one renders
+    /// before the buses it feeds. Tracks caught in a loop are routed straight to the master
+    /// with their sends off. No allocation: `order` and `indegree` have fixed capacity.
+    fn update_routing(&mut self) {
+        let ids: [Option<u32>; MAX_TRACKS] =
+            std::array::from_fn(|i| self.tracks[i].as_ref().map(|t| t.id));
+        let slot_of = |id: u32| ids.iter().position(|t| *t == Some(id));
+        for t in self.tracks.iter_mut().flatten() {
+            t.output_slot = match t.output {
+                MASTER_TRACK => None,
+                id if id == t.id => None,
+                id => slot_of(id),
+            };
+            let own = t.id;
+            for send in &mut t.sends {
+                send.target_slot = if send.enabled && send.target != own {
+                    slot_of(send.target)
+                } else {
+                    None
+                };
+            }
+        }
+        self.indegree.fill(0);
+        for t in self.tracks.iter().flatten() {
+            for dst in t.destinations() {
+                self.indegree[dst] += 1;
+            }
+        }
+        self.order.clear();
+        for slot in 0..MAX_TRACKS {
+            if self.tracks[slot].is_some() && self.indegree[slot] == 0 {
+                self.order.push(slot as u16);
+            }
+        }
+        let mut next = 0;
+        while next < self.order.len() {
+            let slot = self.order[next] as usize;
+            next += 1;
+            let Some(t) = &self.tracks[slot] else {
+                continue;
+            };
+            for dst in t.destinations() {
+                self.indegree[dst] -= 1;
+                if self.indegree[dst] == 0 {
+                    self.order.push(dst as u16);
+                }
+            }
+        }
+        // Whatever is left is in (or downstream of) a loop: cut its routing.
+        for slot in 0..MAX_TRACKS {
+            if self.tracks[slot].is_some() && !self.order.contains(&(slot as u16)) {
+                if let Some(t) = self.tracks[slot].as_mut() {
+                    t.output_slot = None;
+                    t.sends.iter_mut().for_each(|s| s.target_slot = None);
+                }
+                self.order.push(slot as u16);
+            }
+        }
+        self.update_solo();
+    }
+
+    fn chain_mut(&mut self, track: u32) -> Option<&mut Chain> {
+        if track == MASTER_TRACK {
+            Some(&mut self.master_inserts)
+        } else {
+            self.track_mut(track).map(|t| &mut t.inserts)
+        }
+    }
+
+    fn device_slot(&self, id: u32) -> Option<usize> {
+        self.devices
+            .iter()
+            .position(|d| d.as_ref().is_some_and(|d| d.id == id))
+    }
+
+    fn device_mut(&mut self, id: u32) -> Option<&mut DeviceSlot> {
+        self.devices.iter_mut().flatten().find(|d| d.id == id)
+    }
+
+    fn lane_slot(&self, id: u32) -> Option<usize> {
+        self.lanes[..self.lane_end]
+            .iter()
+            .position(|l| l.as_ref().is_some_and(|l| l.id == id))
     }
 
     fn resolve_clips(&mut self, source: u32, slot: Option<usize>) {
@@ -902,8 +1642,39 @@ impl Engine {
             .map_or(0, |i| i + 1);
     }
 
+    /// Under solo, a track stays audible if it is soloed, feeds a soloed track (directly or
+    /// through buses), or is fed by one: soloing a vocal keeps its reverb bus, and soloing a
+    /// bus keeps the tracks feeding it.
     fn update_solo(&mut self) {
         self.any_solo = self.tracks.iter().flatten().any(|t| t.solo);
+        if !self.any_solo {
+            return;
+        }
+        let mut fed = [false; MAX_TRACKS];
+        let mut feeds = [false; MAX_TRACKS];
+        for &slot in &self.order {
+            let Some(t) = &self.tracks[slot as usize] else {
+                continue;
+            };
+            if t.solo || fed[slot as usize] {
+                for dst in t.destinations() {
+                    fed[dst] = true;
+                }
+            }
+        }
+        for &slot in self.order.iter().rev() {
+            let Some(t) = &self.tracks[slot as usize] else {
+                continue;
+            };
+            feeds[slot as usize] = t
+                .destinations()
+                .any(|dst| feeds[dst] || self.tracks[dst].as_ref().is_some_and(|d| d.solo));
+        }
+        for (slot, t) in self.tracks.iter_mut().enumerate() {
+            if let Some(t) = t {
+                t.solo_audible = t.solo || fed[slot] || feeds[slot];
+            }
+        }
     }
 
     fn track_slot(&self, id: u32) -> Option<usize> {
@@ -926,6 +1697,123 @@ impl Engine {
         self.sources
             .iter()
             .position(|s| s.as_ref().is_some_and(|(sid, _)| *sid == id))
+    }
+}
+
+/// Where a block sits on the timeline, for automation.
+struct Timeline {
+    position: u64,
+    running: bool,
+    rendered: u64,
+}
+
+impl Timeline {
+    /// Timeline frame of block frame `i` (automation holds still while stopped).
+    #[inline]
+    fn frame(&self, i: usize) -> u64 {
+        if self.running {
+            self.position.saturating_add(i as u64)
+        } else {
+            self.position
+        }
+    }
+}
+
+impl Send {
+    /// Next gain: the automated value exactly when there is one, else smoothed.
+    #[inline]
+    fn next(&mut self, automated: Option<f32>, k: f32) -> f32 {
+        match automated {
+            Some(g) => self.current = finite_or(g, 0.0).clamp(0.0, 4.0),
+            None => self.current += (self.gain - self.current) * k,
+        }
+        self.current
+    }
+}
+
+#[inline]
+fn lane_value(lanes: &mut [Option<Lane>], lane: Option<usize>, frame: u64) -> Option<f32> {
+    let lane = lanes.get_mut(lane?)?.as_mut()?;
+    Some(lane.cursor.value(&lane.envelope, frame))
+}
+
+/// Track `src`'s block (read) and track `dst`'s block (write), as `(src_l, src_r, dst_l,
+/// dst_r)`. `src != dst`, which routing guarantees.
+fn pair(buf: &mut [f32], src: usize, dst: usize) -> (&[f32], &[f32], &mut [f32], &mut [f32]) {
+    let w = 2 * BLOCK_FRAMES;
+    let (s, d): (&[f32], &mut [f32]) = if src < dst {
+        let (a, b) = buf.split_at_mut(dst * w);
+        (&a[src * w..src * w + w], &mut b[..w])
+    } else {
+        let (a, b) = buf.split_at_mut(src * w);
+        (&b[..w], &mut a[dst * w..dst * w + w])
+    };
+    let (sl, sr) = s.split_at(BLOCK_FRAMES);
+    let (dl, dr) = d.split_at_mut(BLOCK_FRAMES);
+    (sl, sr, dl, dr)
+}
+
+/// Runs an insert chain over a block in control-rate pieces aligned to the engine's frame
+/// counter; parameter automation is applied at the start of each aligned piece.
+fn run_chain(
+    chain: &Chain,
+    devices: &mut [Option<DeviceSlot>],
+    lanes: &mut [Option<Lane>],
+    l: &mut [f32],
+    r: &mut [f32],
+    timeline: &Timeline,
+    ctx: &ProcessContext,
+) {
+    if chain.len == 0 {
+        return;
+    }
+    let n = l.len();
+    let mut a = 0;
+    while a < n {
+        let phase = ((timeline.rendered + a as u64) % CONTROL_FRAMES as u64) as usize;
+        let b = n.min(a + CONTROL_FRAMES - phase);
+        let frame = timeline.frame(a);
+        for slot in chain.iter() {
+            let Some(device) = devices[slot].as_mut() else {
+                continue;
+            };
+            device.update(lanes, frame, phase == 0);
+            if !device.bypass
+                && let Some(state) = device.state.as_mut()
+            {
+                state.process(&mut l[a..b], &mut r[a..b], ctx);
+            }
+        }
+        a = b;
+    }
+}
+
+impl DeviceSlot {
+    /// Passes changed parameter values to the DSP: commanded values whenever they change,
+    /// automated ones only on the control grid (so the result doesn't depend on when
+    /// the audio callback runs).
+    fn update(&mut self, lanes: &mut [Option<Lane>], frame: u64, on_grid: bool) {
+        if !(self.dirty || (self.automated && on_grid)) {
+            return;
+        }
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        for (i, info) in self.kind.params().iter().enumerate() {
+            let value = match self.lanes[i] {
+                NO_LANE => self.base[i],
+                _ if !on_grid => continue,
+                lane => match lane_value(lanes, Some(lane as usize), frame) {
+                    Some(v) => info.clamp(v),
+                    None => self.base[i],
+                },
+            };
+            if value != self.applied[i] {
+                state.set_param(i, value);
+                self.applied[i] = value;
+            }
+        }
+        self.dirty = false;
     }
 }
 

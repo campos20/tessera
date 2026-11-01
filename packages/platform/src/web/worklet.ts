@@ -149,6 +149,26 @@ class TesseraProcessor extends AudioWorkletProcessor {
         case "gc":
           engine.tessera_collect_garbage(this.handle);
           break;
+        case "device":
+          if (!engine.tessera_device_create(this.handle, request.id, request.kind))
+            throw new Error("engine queue full");
+          break;
+        case "automation": {
+          const count = request.points.length / 2;
+          const ptr = engine.tessera_automation_points(this.handle, count);
+          if (count > 0) new Float64Array(engine.memory.buffer, ptr, count * 2).set(request.points);
+          const ok = engine.tessera_automation_commit(
+            this.handle,
+            count,
+            request.lane,
+            request.track,
+            request.kind,
+            request.index,
+            request.device,
+          );
+          if (!ok) throw new Error("engine queue full");
+          break;
+        }
       }
       this.reply({ type: "ack", seq: request.seq, ok: true });
     } catch (e) {
