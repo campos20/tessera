@@ -1,5 +1,5 @@
 import { TauriPlatform } from "@tessera/platform/tauri";
-import { HelloSine } from "@tessera/ui";
+import { Testbench } from "@tessera/ui";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -7,6 +7,6 @@ const platform = new TauriPlatform();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <HelloSine platform={platform} />
+    <Testbench platform={platform} />
   </StrictMode>,
 );

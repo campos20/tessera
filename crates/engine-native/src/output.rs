@@ -1,9 +1,9 @@
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SampleFormat, SizedSample};
-use engine_core::{Command, Engine, EngineController, Event};
+use engine_core::{AudioBuffer, Command, Engine, EngineController, Event};
 use serde::Serialize;
 
 /// Frames rendered per engine call when the driver hands us a larger buffer.
@@ -94,6 +94,20 @@ impl AudioOutput {
 
     pub fn poll_event(&mut self) -> Option<Event> {
         self.controller.poll_event()
+    }
+
+    /// Hands decoded audio (at [`OutputInfo::sample_rate`]) to the engine.
+    pub fn add_source(
+        &mut self,
+        source: u32,
+        buffer: Arc<AudioBuffer>,
+    ) -> Result<(), Arc<AudioBuffer>> {
+        self.controller.add_source(source, buffer)
+    }
+
+    /// Frees audio the engine has released. Call regularly (never from the audio thread).
+    pub fn collect_garbage(&mut self) -> usize {
+        self.controller.collect_garbage()
     }
 }
 

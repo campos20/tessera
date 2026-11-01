@@ -1,0 +1,137 @@
+.testbench {
+  font-family: system-ui, sans-serif;
+  max-width: 64rem;
+  margin: 2rem auto;
+  padding: 0 1.5rem;
+  color: #1d1d1f;
+}
+
+.testbench h1 {
+  font-size: 1.6rem;
+  margin-bottom: 0.25rem;
+}
+
+.testbench .edition {
+  color: #6e6e73;
+  margin-top: 0;
+}
+
+.testbench button,
+.testbench .file-button {
+  font: inherit;
+  padding: 0.35rem 0.9rem;
+  border-radius: 0.4rem;
+  border: 1px solid #c7c7cc;
+  background: #fff;
+  cursor: pointer;
+}
+
+.testbench button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.testbench .file-button input {
+  display: none;
+}
+
+.testbench .transport,
+.testbench .toolbar,
+.testbench .master {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin: 1rem 0;
+}
+
+.testbench .transport label,
+.testbench .track label {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.testbench .transport input[type="number"] {
+  width: 4.5rem;
+}
+
+.testbench .position {
+  font-family: ui-monospace, monospace;
+  min-width: 11rem;
+}
+
+.testbench .tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.testbench .track {
+  display: grid;
+  grid-template-columns: 9rem 220px 1fr 1fr auto auto 8rem auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.5rem;
+  border: 1px solid #e5e5ea;
+  border-radius: 0.5rem;
+}
+
+.testbench .track .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
+}
+
+.testbench .track .value {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  min-width: 4rem;
+}
+
+.testbench .toggle.on {
+  background: #ffd60a;
+}
+
+.testbench .meter {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 8rem;
+}
+
+.testbench .meter .bar {
+  height: 0.35rem;
+  background: #34c759;
+  border-radius: 0.2rem;
+  transition: width 50ms linear;
+}
+
+.testbench .meter .bar.clip {
+  background: #ff3b30;
+}
+
+.testbench .hint {
+  color: #6e6e73;
+}
+
+.testbench .error {
+  color: #d70015;
+}
+
+.testbench dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  font-size: 0.9rem;
+}
+
+.testbench dt {
+  color: #6e6e73;
+}
+
+.testbench dd {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+}

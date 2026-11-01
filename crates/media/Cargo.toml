@@ -1,0 +1,26 @@
+[package]
+name = "media"
+description = "Audio decoding (symphonia), resampling (rubato) and waveform peaks. Native and WASM."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = []
+# Generate TypeScript bindings into packages/schema.
+ts = ["dep:ts-rs"]
+
+[dependencies]
+rubato = "5"
+serde = { version = "1.0.229", features = ["derive"] }
+symphonia = { version = "0.6.1", default-features = false, features = ["wav", "pcm", "flac", "mp3", "ogg", "vorbis", "aac", "isomp4", "adpcm"] }
+ts-rs = { version = "12.0.1", optional = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+hound = "3.5.1"

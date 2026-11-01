@@ -7,10 +7,17 @@
 //! Real-time rules apply to everything reachable from [`Engine::process`]: no allocation,
 //! no locks, no I/O, no logging, no panics.
 
+mod buffer;
 mod engine;
+mod metronome;
+pub mod offline;
 mod osc;
 mod protocol;
 
-pub use engine::{COMMAND_QUEUE_CAPACITY, EVENT_QUEUE_CAPACITY, Engine, EngineController};
+pub use buffer::AudioBuffer;
+pub use engine::{
+    BLOCK_FRAMES, EVENT_QUEUE_CAPACITY, Engine, EngineController, MAX_CLIPS, MAX_SOURCES,
+    MAX_TRACKS, MESSAGE_QUEUE_CAPACITY,
+};
 pub use osc::SineOsc;
-pub use protocol::{Command, Event, Opcode};
+pub use protocol::{Arg, Command, Event, LayoutEntry, MAX_ARGS, RawMessage};

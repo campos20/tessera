@@ -1,1 +1,1 @@
-export { HelloSine } from "./HelloSine";
+export { Testbench } from "./Testbench";

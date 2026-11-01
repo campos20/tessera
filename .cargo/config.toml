@@ -1,3 +1,5 @@
 [env]
 # ts-rs writes generated TypeScript types here (see packages/schema).
 TS_RS_EXPORT_DIR = { value = "packages/schema/src/generated", relative = true }
+# Frame positions are u64 in Rust; f64 numbers are exact up to 2^53 frames.
+TS_RS_LARGE_INT = "number"

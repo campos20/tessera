@@ -4,5 +4,13 @@ export type { AudioDeviceList } from "./generated/AudioDeviceList";
 export type { AudioHostInfo } from "./generated/AudioHostInfo";
 export type { Command } from "./generated/Command";
 export type { Event } from "./generated/Event";
-export { Opcode } from "./generated/Opcode";
 export type { OutputInfo } from "./generated/OutputInfo";
+export type { Peaks } from "./generated/Peaks";
+export {
+  CommandLayout,
+  EventLayout,
+  type FieldKind,
+  MAX_ARGS,
+  type MessageLayout,
+} from "./generated/protocolLayout";
+export type { SourceInfo } from "./generated/SourceInfo";
