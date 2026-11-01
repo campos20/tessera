@@ -92,6 +92,7 @@ describe("hit testing", async () => {
         gain: 1,
         fadeIn: 2000,
         fadeOut: 0,
+        tune: null,
       },
     ],
   };

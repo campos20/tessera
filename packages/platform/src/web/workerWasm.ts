@@ -30,6 +30,11 @@ export interface WorkerExports {
     maxLag: number,
     out: number,
   ): number;
+  tune_open(data: number, len: number, ext: number, extLen: number, targetRate: number, out: number): number;
+  tune_plan(session: number, notes: number, notesLen: number, known: number, knownLen: number): number;
+  tune_region_channel(session: number, index: number, channel: number): number;
+  tune_channels(session: number): number;
+  tune_close(session: number): void;
 }
 
 export interface DecodedAudio {
@@ -178,6 +183,60 @@ export function measureLatency(
   } finally {
     m.worker_free(ptr, bytes.length);
     m.worker_free(out, 16);
+  }
+}
+
+/** Opens a tuning session for an audio file. Returns the session handle and its analysis JSON. */
+export function tuneOpen(
+  m: WorkerExports,
+  bytes: Uint8Array,
+  extension: string | undefined,
+  targetRate: number,
+): { session: number; analysis: string } {
+  const ext = extension ? new TextEncoder().encode(extension) : undefined;
+  const extPtr = ext ? copyIn(m, ext) : 0;
+  const out = m.worker_alloc(4);
+  const handle = m.tune_open(copyIn(m, bytes), bytes.length, extPtr, ext?.length ?? 0, targetRate, out);
+  if (ext) m.worker_free(extPtr, ext.length);
+  const session = new Uint32Array(m.memory.buffer, out, 1)[0]!;
+  m.worker_free(out, 4);
+  const result = readBytes(m, handle);
+  if (!session) throw new Error(result);
+  return { session, analysis: result };
+}
+
+/** Plans playback for notes; returns the plan JSON and the audio of newly rendered regions. */
+export function tunePlan(
+  m: WorkerExports,
+  session: number,
+  notesJson: string,
+  knownJson: string,
+): { plan: string; regions: Float32Array[][] } {
+  const enc = new TextEncoder();
+  const notes = enc.encode(notesJson);
+  const known = enc.encode(knownJson);
+  const handle = m.tune_plan(session, copyIn(m, notes), notes.length, copyIn(m, known), known.length);
+  const ok = m.bytes_result_ok(handle);
+  const plan = readBytes(m, handle);
+  if (!ok) throw new Error(plan);
+  const parsed = JSON.parse(plan) as { regions: { frames: number }[] };
+  const channels = m.tune_channels(session);
+  const regions = parsed.regions.map((r, i) =>
+    Array.from({ length: channels }, (_, ch) =>
+      new Float32Array(m.memory.buffer, m.tune_region_channel(session, i, ch), r.frames).slice(),
+    ),
+  );
+  return { plan, regions };
+}
+
+/** Reads a `BytesResult` as text and frees it. */
+function readBytes(m: WorkerExports, handle: number): string {
+  try {
+    return new TextDecoder().decode(
+      new Uint8Array(m.memory.buffer, m.bytes_result_ptr(handle), m.bytes_result_len(handle)),
+    );
+  } finally {
+    m.bytes_result_free(handle);
   }
 }
 

@@ -191,3 +191,102 @@ test("reports undecodable files without breaking the session", async ({ page }) 
     .setInputFiles({ name: "ok.wav", mimeType: "audio/wav", buffer: sineWav(0.5) });
   await expect(page.locator("[data-testid^=track-header-]").first()).toContainText("ok");
 });
+
+/** A 16-bit mono 44.1 kHz WAV singing A3, C4 and E4 with short gaps between them. */
+function melodyWav(sampleRate = 44_100): Buffer {
+  const notes: [number, number, number][] = [
+    [0.1, 0.7, 220],
+    [0.8, 1.4, 261.63],
+    [1.5, 2.1, 329.63],
+  ];
+  const frames = Math.round(2.4 * sampleRate);
+  const data = Buffer.alloc(frames * 2);
+  for (let i = 0; i < frames; i++) {
+    const t = i / sampleRate;
+    const note = notes.find(([a, b]) => t >= a && t < b);
+    const v = note ? Math.sin(2 * Math.PI * note[2] * t) * 12_000 : 0;
+    data.writeInt16LE(Math.round(v), i * 2);
+  }
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVEfmt ", 8);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
+}
+
+interface SavedNote {
+  id: number;
+  center: number;
+  shift: number;
+}
+
+const savedNotes = async (page: Page): Promise<SavedNote[]> =>
+  ((await saved(page)).tracks[0]!.clips[0] as unknown as { tune: { notes: SavedNote[] } | null }).tune
+    ?.notes ?? [];
+
+test("edits pitch in Tune, plays the result, undoes and survives a reload", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await open(page);
+  await page
+    .getByTestId("import")
+    .setInputFiles({ name: "Vocal.wav", mimeType: "audio/wav", buffer: melodyWav() });
+  const lane = page.locator("[data-testid^=lane-]").first();
+  await expect(page.locator("[data-testid^=track-header-]")).toHaveCount(1);
+
+  // Double-click the clip: Tune analyzes it and shows its three notes.
+  const clip = await at(lane, 40, 50);
+  await page.mouse.dblclick(clip.x, clip.y);
+  const editor = page.getByTestId("tune-editor");
+  await expect(editor).toBeVisible();
+  let notes = await savedNotes(page);
+  expect(notes.map((n) => Math.round(n.center))).toEqual([57, 60, 64]);
+  expect(notes.every((n) => n.shift === 0)).toBe(true);
+
+  // Select every note and raise them a semitone.
+  const canvas = page.getByTestId("tune-canvas");
+  const box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.press("ArrowUp");
+  await expect
+    .poll(async () => (await savedNotes(page)).map((n) => Math.round(n.center + n.shift)))
+    .toEqual([58, 61, 65]);
+
+  // The tuned result plays (rendered regions are in the engine), and so does the A/B original.
+  await expect(page.getByTestId("busy")).toHaveCount(0);
+  await page.getByRole("button", { name: "Play" }).click();
+  await expect.poll(() => masterPeak(page)).toBeGreaterThan(0.2);
+  await page.getByRole("button", { name: "Pause" }).click();
+  await editor.getByRole("button", { name: /A\/B/ }).click();
+  await expect(editor.getByRole("button", { name: /A\/B/ })).toHaveAttribute("aria-pressed", "true");
+  await editor.getByRole("button", { name: /A\/B/ }).click();
+
+  // Undo restores the sung pitch; redo brings the edit back.
+  await page.keyboard.press("ControlOrMeta+z");
+  await expect.poll(async () => (await savedNotes(page)).every((n) => n.shift === 0)).toBe(true);
+  await page.keyboard.press("ControlOrMeta+Shift+z");
+  await expect.poll(async () => (await savedNotes(page)).every((n) => n.shift !== 0)).toBe(true);
+
+  // Close, reload: the edits are saved and the clip still plays tuned.
+  await editor.getByRole("button", { name: "Close Tune" }).click();
+  await expect(editor).toHaveCount(0);
+  await page.reload();
+  await open(page);
+  await expect(page.getByTestId("busy")).toHaveCount(0);
+  notes = await savedNotes(page);
+  expect(notes.map((n) => Math.round(n.center + n.shift))).toEqual([58, 61, 65]);
+  await page.getByRole("button", { name: "Play" }).click();
+  await expect.poll(() => masterPeak(page)).toBeGreaterThan(0.2);
+  await page.getByRole("button", { name: "Pause" }).click();
+  expect(errors).toEqual([]);
+});

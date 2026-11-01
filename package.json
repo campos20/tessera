@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
-    "gen:schema": "cargo test -q -p engine-core -p engine-native -p media -p project --features engine-core/ts,engine-native/ts,media/ts,project/ts export",
+    "gen:schema": "cargo test -q -p engine-core -p engine-native -p media -p project -p tune --features engine-core/ts,engine-native/ts,media/ts,project/ts,tune/ts export",
     "dev:web": "pnpm build:wasm && pnpm --filter @tessera/web dev",
     "dev:desktop": "pnpm --filter @tessera/desktop tauri dev",
     "build:web": "pnpm build:wasm && pnpm --filter @tessera/web build",

@@ -16,6 +16,7 @@ import { Meter } from "../Meter";
 import { AudioSettings } from "./AudioSettings";
 import { StatusBar } from "./StatusBar";
 import { TransportBar } from "./TransportBar";
+import { TuneEditor } from "../tune/TuneEditor";
 import "../theme.css";
 import "./App.css";
 
@@ -53,6 +54,7 @@ function Workspace() {
         onZoom={(f) => setView((v) => zoomAround(v, f, 0))}
       />
       <Arrange view={view} onView={setView} snap={snap} />
+      <TuneEditor />
       <Footer onError={() => session.reportError(undefined)} />
       {settingsOpen && <AudioSettings onClose={() => setSettingsOpen(false)} />}
     </div>

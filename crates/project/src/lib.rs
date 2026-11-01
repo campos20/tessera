@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Current saved-document version.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Unit of all timeline positions and lengths in a project.
 pub const PROJECT_SAMPLE_RATE: u32 = 48_000;
@@ -98,6 +98,19 @@ pub struct Clip {
     pub gain: f32,
     pub fade_in: u64,
     pub fade_out: u64,
+    /// Note-level pitch and timing edits; `None` plays the source as is.
+    pub tune: Option<TuneEdits>,
+}
+
+/// A clip's Tune edits. Note times are seconds in the source; the analysis they refer to is
+/// recomputed (or cached) from the source audio, so only the edits are saved.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct TuneEdits {
+    pub notes: Vec<tune::Note>,
+    /// Scale for auto-correction and highlighting; `None` is chromatic.
+    pub key: Option<tune::Key>,
 }
 
 /// An imported audio file. The original file is stored with the project and decoded again
@@ -147,7 +160,28 @@ impl std::error::Error for ProjectError {}
 pub type Migration = fn(&mut Value) -> Result<(), String>;
 
 /// `MIGRATIONS[i]` upgrades version `i + 1` to `i + 2`. Empty while only v1 exists.
-pub const MIGRATIONS: &[Migration] = &[v1_to_v2];
+pub const MIGRATIONS: &[Migration] = &[v1_to_v2, v2_to_v3];
+
+/// v3 (M4): clips gain optional Tune edits; existing clips have none.
+fn v2_to_v3(project: &mut Value) -> Result<(), String> {
+    let tracks = project
+        .get_mut("tracks")
+        .and_then(Value::as_array_mut)
+        .ok_or("missing tracks")?;
+    for track in tracks {
+        let clips = track
+            .get_mut("clips")
+            .and_then(Value::as_array_mut)
+            .ok_or("missing clips")?;
+        for clip in clips {
+            clip.as_object_mut()
+                .ok_or("clip is not an object")?
+                .entry("tune")
+                .or_insert(Value::Null);
+        }
+    }
+    Ok(())
+}
 
 /// v2 (M3): tracks gain an input selection for recording; existing tracks record input 1 (mono).
 fn v1_to_v2(project: &mut Value) -> Result<(), String> {
@@ -256,6 +290,35 @@ impl Project {
                     }
                     Some(_) => {}
                 }
+                if let Some(tune) = &clip.tune {
+                    let mut note_ids = std::collections::HashSet::new();
+                    for n in &tune.notes {
+                        let finite = [
+                            n.center,
+                            n.os,
+                            n.oe,
+                            n.ns,
+                            n.ne,
+                            n.shift,
+                            n.drift,
+                            n.modulation,
+                        ]
+                        .iter()
+                        .all(|v| v.is_finite());
+                        if !finite || n.e <= n.s || n.ne < n.ns || n.oe < n.os {
+                            issues.push(format!(
+                                "clip {} has an invalid tune note {}",
+                                clip.id, n.id
+                            ));
+                        }
+                        if !note_ids.insert(n.id) {
+                            issues.push(format!(
+                                "clip {} has duplicate tune note id {}",
+                                clip.id, n.id
+                            ));
+                        }
+                    }
+                }
             }
         }
         if self.sample_rate != PROJECT_SAMPLE_RATE {
@@ -310,6 +373,7 @@ mod tests {
                     gain: 1.0,
                     fade_in: 0,
                     fade_out: 480,
+                    tune: None,
                 }],
             }],
             sources: vec![Source {
@@ -411,6 +475,50 @@ mod tests {
         let mut p = sample();
         p.tracks[0].clips[0].offset = 10;
         assert!(p.validate().iter().any(|i| i.contains("past the end")));
+    }
+
+    #[test]
+    fn migrates_v2_projects_to_v3_and_validates_tune_edits() {
+        let mut v2 = serde_json::to_value(sample()).unwrap();
+        v2["schemaVersion"] = Value::from(2);
+        v2["tracks"][0]["clips"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("tune");
+        let project = load(&v2.to_string()).unwrap();
+        assert_eq!(project.tracks[0].clips[0].tune, None);
+
+        let note = tune::Note {
+            id: 1,
+            s: 0,
+            e: 10,
+            center: 60.2,
+            os: 0.1,
+            oe: 0.5,
+            ns: 0.1,
+            ne: 0.5,
+            shift: -0.2,
+            drift: 0.0,
+            modulation: 0.0,
+            formant: false,
+        };
+        let mut p = sample();
+        p.tracks[0].clips[0].tune = Some(TuneEdits {
+            notes: vec![note.clone(), note.clone()],
+            key: None,
+        });
+        assert!(
+            p.validate()
+                .iter()
+                .any(|i| i.contains("duplicate tune note id 1"))
+        );
+        let mut bad = note;
+        bad.ne = f64::NAN;
+        p.tracks[0].clips[0].tune = Some(TuneEdits {
+            notes: vec![bad],
+            key: None,
+        });
+        assert!(p.validate().iter().any(|i| i.contains("invalid tune note")));
     }
 
     #[test]

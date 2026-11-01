@@ -43,6 +43,13 @@ function fakePlatform(engineRate: number, saved: Project, takes: RecordedTake[] 
     onRecordingProgress: () => () => {},
     onXruns: () => () => {},
     measureLatency: async () => null,
+    tune: {
+      open: async () => {
+        throw new Error("not used");
+      },
+      plan: async () => ({ segments: [], outputFrames: 0, sources: {} }),
+      close: async () => {},
+    },
     send: (c) => void sent.push(c),
     onEvent: (listener) => {
       emit = listener;

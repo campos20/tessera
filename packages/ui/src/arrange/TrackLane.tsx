@@ -1,5 +1,5 @@
 import type { Peaks, Track } from "@tessera/schema";
-import { type PointerEventHandler, useRef } from "react";
+import { type MouseEventHandler, type PointerEventHandler, useRef } from "react";
 import { useCanvas } from "../hooks/useCanvas";
 import type { LiveTake } from "../state/session";
 import { drawLane, drawLiveTake } from "./drawLane";
@@ -20,6 +20,7 @@ export interface TrackLaneProps {
   onPointerDown: PointerEventHandler<HTMLCanvasElement>;
   onPointerMove: PointerEventHandler<HTMLCanvasElement>;
   onPointerUp: PointerEventHandler<HTMLCanvasElement>;
+  onDoubleClick: MouseEventHandler<HTMLCanvasElement>;
 }
 
 const STYLE = {
@@ -55,6 +56,7 @@ export function TrackLane(p: TrackLaneProps) {
       onPointerMove={p.onPointerMove}
       onPointerUp={p.onPointerUp}
       onPointerCancel={p.onPointerUp}
+      onDoubleClick={p.onDoubleClick}
     />
   );
 }

@@ -114,6 +114,7 @@ export function addClip(p: Project, trackId: number, sourceId: number, start: nu
     gain: 1,
     fadeIn: 0,
     fadeOut: 0,
+    tune: null,
   });
   sortClips(track);
   return id;

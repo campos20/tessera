@@ -1,4 +1,14 @@
-import type { AudioDeviceList, Command, Event, Project, SourceInfo, TakeProgress } from "@tessera/schema";
+import type {
+  AudioDeviceList,
+  Command,
+  Event,
+  Note,
+  PlannedSegment,
+  Project,
+  SourceInfo,
+  TakeProgress,
+  TuneAnalysis,
+} from "@tessera/schema";
 
 export type Edition = "web" | "desktop";
 
@@ -83,6 +93,28 @@ export interface ProjectStorage {
   importArchive(file: File, newId: string): Promise<Project>;
 }
 
+/** Playback of a tuned clip: original segments and rendered regions (engine frames). */
+export interface TunePlan {
+  segments: PlannedSegment[];
+  outputFrames: number;
+  /** Engine source id of each rendered region, by region key. */
+  sources: Record<string, number>;
+}
+
+/**
+ * Note-level pitch and timing editing. Sessions run off the UI and audio threads (the web
+ * worker, the desktop backend) and keep each source's analysis, so edits only render the
+ * regions they change.
+ */
+export interface TuneService {
+  /** Decodes and analyzes a project audio file at the engine rate. */
+  open(sessionId: string, projectId: string, path: string): Promise<TuneAnalysis>;
+  /** Plans playback for `notes`, rendering only regions not rendered before in this session. */
+  plan(sessionId: string, notes: Note[]): Promise<TunePlan>;
+  /** Ends the session and frees its rendered audio. */
+  close(sessionId: string): Promise<void>;
+}
+
 export type Diagnostics = Record<string, string | number | boolean>;
 
 export type EngineEventListener = (event: Event) => void;
@@ -95,6 +127,7 @@ export interface AudioPlatform {
   readonly edition: Edition;
   readonly capabilities: PlatformCapabilities;
   readonly storage: ProjectStorage;
+  readonly tune: TuneService;
   /**
    * Starts the audio engine. On the web this must run from a user gesture. Safe to call
    * more than once.

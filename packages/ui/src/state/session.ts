@@ -5,7 +5,8 @@ import type {
   ProjectSummary,
   RecordedTake,
 } from "@tessera/platform";
-import type { Peaks, Project, SourceInfo, TakeProgress } from "@tessera/schema";
+import type { Peaks, Project, SourceInfo, TakeProgress, TuneAnalysis } from "@tessera/schema";
+import { isEdited } from "../tune/model";
 import { createStore } from "zustand/vanilla";
 import type { MeterReading } from "../Meter";
 import { addClip, addSource, addTrack, findTrack, newProject, projectEnd } from "../model/edits";
@@ -35,6 +36,15 @@ export interface LiveTake {
   framesPerPeak: number;
   /** `[min, max, ...]` so far. */
   peaks: number[];
+}
+
+export interface TuneState {
+  /** The clip open in the Tune editor. */
+  editing: number | undefined;
+  /** Analyses of clips with an open tuning session. */
+  analyses: ReadonlyMap<number, TuneAnalysis>;
+  /** Clips temporarily playing their original audio (A/B comparison). */
+  bypass: ReadonlySet<number>;
 }
 
 export interface RecordState {
@@ -98,6 +108,11 @@ export class Session {
     recording: false,
     countingIn: false,
   }));
+  readonly tune = createStore<TuneState>()(() => ({
+    editing: undefined,
+    analyses: new Map(),
+    bypass: new Set(),
+  }));
   readonly recording = createStore<RecordState>()(() => ({
     armed: new Set(),
     monitored: new Set(),
@@ -134,7 +149,10 @@ export class Session {
     this.sync.sync(this.store.getState().project);
 
     this.store.subscribe((state, prev) => {
-      if (state.project !== prev.project) this.sync.sync(state.project);
+      if (state.project !== prev.project) {
+        this.sync.sync(state.project);
+        this.onTuneEdits(state.project, prev.project);
+      }
       if (state.revision !== prev.revision && state.project.id === prev.project.id) this.scheduleSave();
     });
     platform.onEvent((event) => this.onEngineEvent(event));
@@ -241,6 +259,8 @@ export class Session {
 
   /** A fresh engine (after a device change): resend everything and reload the audio. */
   private async reloadEngine(rate: number, position: number) {
+    // Tune sessions decoded audio at the old rate: reopen them after the audio reloads.
+    this.closeTuneSessions(this.project.id);
     this.sync.reset();
     this.sync.setEngineRate(rate);
     this.sync.sync(this.project);
@@ -248,6 +268,7 @@ export class Session {
     for (const track of armed) this.platform.send({ type: "SetTrackArm", track, armed: true });
     for (const track of monitored) this.platform.send({ type: "SetTrackMonitor", track, monitor: true });
     await this.loadAudio(this.project);
+    await this.loadTuning(this.project);
     this.seek(position);
   }
 
@@ -619,12 +640,149 @@ export class Session {
     return projectEnd(this.project);
   }
 
+  // Tune -----------------------------------------------------------------------------------
+
+  /** Opens a clip in the Tune editor, analyzing it first if needed. */
+  openTune(clipId: number): Promise<void> {
+    return this.run("Analyzing pitch…", async () => {
+      await this.startEngine().catch(() => {}); // Analysis works before audio output starts.
+      await this.openTuneSession(clipId);
+      const found = this.findClipById(clipId);
+      const analysis = this.tune.getState().analyses.get(clipId);
+      if (!found || !analysis) return;
+      if (!found.clip.tune) {
+        this.store.getState().edit("Open in Tune", (p) => {
+          const clip = p.tracks.flatMap((t) => t.clips).find((c) => c.id === clipId);
+          if (clip) clip.tune = { notes: analysis.notes, key: analysis.key };
+        });
+      }
+      this.tune.setState({ editing: clipId });
+      void this.planClip(clipId);
+    });
+  }
+
+  closeTuneEditor() {
+    this.tune.setState({ editing: undefined });
+  }
+
+  /** A/B: play the clip's original audio instead of the tuned result (not saved). */
+  setTuneBypass(clipId: number, bypass: boolean) {
+    const set = new Set(this.tune.getState().bypass);
+    if (bypass) set.add(clipId);
+    else set.delete(clipId);
+    this.tune.setState({ bypass: set });
+    void this.planClip(clipId);
+  }
+
+  private tuneSessionId(clipId: number) {
+    return `${this.project.id}:${clipId}`;
+  }
+
+  private findClipById(clipId: number) {
+    for (const track of this.project.tracks) {
+      const clip = track.clips.find((c) => c.id === clipId);
+      if (clip) return { track, clip };
+    }
+    return undefined;
+  }
+
+  private readonly opening = new Map<number, Promise<void>>();
+
+  /** Starts a tuning session (analysis) for a clip's source, once. */
+  private openTuneSession(clipId: number): Promise<void> {
+    if (this.tune.getState().analyses.has(clipId)) return Promise.resolve();
+    let pending = this.opening.get(clipId);
+    if (!pending) {
+      const projectId = this.project.id;
+      pending = (async () => {
+        const found = this.findClipById(clipId);
+        const source = found && this.project.sources.find((s) => s.id === found.clip.sourceId);
+        if (!source) throw new Error("The clip's audio is missing.");
+        const analysis = await this.platform.tune.open(this.tuneSessionId(clipId), projectId, source.file);
+        if (this.project.id !== projectId) return;
+        this.tune.setState((s) => ({ analyses: new Map(s.analyses).set(clipId, analysis) }));
+      })().finally(() => this.opening.delete(clipId));
+      this.opening.set(clipId, pending);
+    }
+    return pending;
+  }
+
+  /** Re-plans clips whose Tune edits changed, and opens sessions for tuned clips without one. */
+  private onTuneEdits(next: Project, prev: Project) {
+    if (next.id !== prev.id) return;
+    const before = new Map(prev.tracks.flatMap((t) => t.clips.map((c) => [c.id, c.tune] as const)));
+    for (const clip of next.tracks.flatMap((t) => t.clips)) {
+      if (clip.tune === before.get(clip.id)) continue;
+      if (!clip.tune) this.sync.setTunePlan(clip.id, undefined);
+      else void this.ensureTuned(clip.id);
+    }
+  }
+
+  /** Makes a clip with edited notes play tuned (opening its session in the background). */
+  private async ensureTuned(clipId: number) {
+    const clip = this.findClipById(clipId)?.clip;
+    if (!clip?.tune) return;
+    if (!this.tune.getState().analyses.has(clipId)) {
+      if (!clip.tune.notes.some(isEdited)) return; // Unedited: the source plays as is.
+      try {
+        await this.openTuneSession(clipId);
+      } catch (e) {
+        this.reportError(`Tune could not analyze "${clip.name}": ${message(e)}`);
+        return;
+      }
+    }
+    await this.planClip(clipId);
+  }
+
+  private readonly planning = new Set<number>();
+  private readonly replan = new Set<number>();
+
+  /** Asks the platform for a clip's playback plan; coalesces edits made while one is running. */
+  private async planClip(clipId: number) {
+    if (this.planning.has(clipId)) {
+      this.replan.add(clipId);
+      return;
+    }
+    this.planning.add(clipId);
+    try {
+      for (;;) {
+        const clip = this.findClipById(clipId)?.clip;
+        if (
+          !clip?.tune ||
+          this.tune.getState().bypass.has(clipId) ||
+          !this.tune.getState().analyses.has(clipId)
+        ) {
+          this.sync.setTunePlan(clipId, undefined);
+        } else {
+          const tune = clip.tune;
+          const plan = await this.platform.tune.plan(this.tuneSessionId(clipId), tune.notes);
+          // Only apply the plan if the notes didn't change meanwhile (a re-plan is queued).
+          if (this.findClipById(clipId)?.clip.tune === tune) this.sync.setTunePlan(clipId, plan);
+        }
+        if (!this.replan.delete(clipId)) break;
+      }
+    } catch (e) {
+      this.reportError(`Tune could not render: ${message(e)}`);
+    } finally {
+      this.planning.delete(clipId);
+    }
+  }
+
+  /** Ends every tuning session (switching projects, engine restart). */
+  private closeTuneSessions(projectId: string) {
+    for (const clipId of this.tune.getState().analyses.keys()) {
+      void this.platform.tune.close(`${projectId}:${clipId}`).catch(() => {});
+    }
+    this.tune.setState({ editing: undefined, analyses: new Map(), bypass: new Set() });
+  }
+
   // Internals ------------------------------------------------------------------------------
 
   /** Replaces the open project: empties the engine, then loads the new project's audio. */
   private async loadProject(project: Project) {
     clearTimeout(this.saveTimer);
     this.stop();
+    this.closeTuneSessions(this.project.id);
     this.sync.reset();
     // Arming and monitoring belong to the session, not the project.
     for (const track of this.recording.getState().armed)
@@ -637,6 +795,17 @@ export class Session {
     safeLocalStorage()?.setItem(LAST_PROJECT_KEY, project.id);
     this.ui.setState({ saveState: "saved" });
     await this.loadAudio(project);
+    await this.loadTuning(project);
+  }
+
+  /** Re-renders the edited Tune clips of a freshly loaded project. */
+  private async loadTuning(project: Project) {
+    const tuned = project.tracks.flatMap((t) => t.clips).filter((c) => c.tune?.notes.some(isEdited));
+    for (const [i, clip] of tuned.entries()) {
+      if (this.project.id !== project.id) return;
+      this.ui.setState({ busy: `Preparing Tune ${i + 1}/${tuned.length}: ${clip.name}` });
+      await this.ensureTuned(clip.id);
+    }
   }
 
   /** Decodes every source the project's clips use into the engine. */

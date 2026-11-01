@@ -112,3 +112,59 @@ describe("EngineSync", () => {
     expect(sync.hasSource(ids.source)).toBe(false);
   });
 });
+
+describe("EngineSync with Tune", () => {
+  it("plays a tuned clip as crossfaded original and rendered segments", async () => {
+    const { sent, sync, ids, project } = setup();
+    const tuned = produce(project, (p) => {
+      const clip = p.tracks[0]!.clips[0]!;
+      clip.tune = { notes: [], key: null };
+    });
+    sync.sync(tuned);
+    sync.registerSource(ids.source, 7);
+    sent.length = 0;
+    // 1 s clip at 2 s: original 0–0.4 s, a rendered region 0.4–0.6 s, original after.
+    sync.setTunePlan(ids.clip, {
+      outputFrames: 48_000,
+      segments: [
+        { kind: "original", start: 0, end: 19_200 },
+        { kind: "rendered", start: 19_200, end: 28_800, renderStart: 18_960, renderEnd: 29_040, key: "r1" },
+        { kind: "original", start: 28_800, end: 48_000 },
+      ],
+      sources: { r1: 42 },
+    });
+    expect(sent[0]).toEqual({ type: "RemoveClip", clip: ids.clip });
+    const clips = sent.filter((c) => c.type === "SetClip");
+    expect(clips).toHaveLength(3);
+    expect(clips[0]).toMatchObject({
+      source: 7,
+      start: 96_000,
+      offset: 0,
+      length: 19_440,
+      fadeIn: 0,
+      fadeOut: 480,
+    });
+    expect(clips[1]).toMatchObject({
+      source: 42,
+      start: 96_000 + 18_960,
+      offset: 0,
+      length: 10_080,
+      fadeIn: 480,
+      fadeOut: 480,
+    });
+    expect(clips[2]).toMatchObject({
+      source: 7,
+      start: 96_000 + 28_560,
+      offset: 28_560,
+      length: 19_440,
+      fadeIn: 480,
+      fadeOut: 0,
+    });
+
+    // Back to plain playback (A/B): the segments go and the clip returns.
+    sent.length = 0;
+    sync.setTunePlan(ids.clip, undefined);
+    expect(sent.filter((c) => c.type === "RemoveClip")).toHaveLength(3);
+    expect(sent.at(-1)).toMatchObject({ type: "SetClip", clip: ids.clip, source: 7 });
+  });
+});
