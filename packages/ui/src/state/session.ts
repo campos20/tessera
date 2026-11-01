@@ -105,10 +105,21 @@ export class Session {
   /** Starts the audio engine (on the web this needs a user gesture). */
   async startEngine(): Promise<void> {
     const info = await this.platform.start();
-    if (this.ui.getState().engineRate !== info.sampleRate) {
-      this.ui.setState({ engineRate: info.sampleRate });
-      this.sync.setEngineRate(info.sampleRate);
-    }
+    if (this.ui.getState().engineRate !== info.sampleRate) this.ui.setState({ engineRate: info.sampleRate });
+    this.adoptEngineRate(info.sampleRate);
+  }
+
+  /**
+   * Converts everything sent to the engine to its real sample rate. Called as soon as the rate
+   * is known, either from `start()` or from an import (whose `SourceInfo.sampleRate` is the
+   * engine rate). Importing doesn't need a user gesture, so after a reload the rate is right
+   * before the first Play.
+   */
+  private adoptEngineRate(rate: number) {
+    if (this.sync.rate === rate) return;
+    this.sync.setEngineRate(rate); // Re-sends every clip and the loop in the new units.
+    // The playhead too; the guard ignores reports still in the old units.
+    this.seek(this.transport.getState().position);
   }
 
   // Projects -------------------------------------------------------------------------------
@@ -269,6 +280,7 @@ export class Session {
   }
 
   private registerAudio(sourceId: number, info: SourceInfo) {
+    this.adoptEngineRate(info.sampleRate);
     this.sync.registerSource(sourceId, info.id);
     // Peaks arrive in engine frames; the timeline draws in project frames.
     const scale = this.project.sampleRate / info.sampleRate;

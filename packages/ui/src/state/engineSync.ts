@@ -26,6 +26,10 @@ export class EngineSync {
   toProject = (frames: number, project: Project) =>
     Math.round((frames * project.sampleRate) / this.engineRate);
 
+  get rate(): number {
+    return this.engineRate;
+  }
+
   setEngineRate(rate: number) {
     if (rate === this.engineRate) return;
     this.engineRate = rate;
